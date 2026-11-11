@@ -1,0 +1,65 @@
+# ============================================================
+# DEPLOY 2: Firebase Hosting
+# Publica la app en: https://expediente-en-linea1.web.app
+#
+# REQUISITOS:
+#   1. firebase.json y .firebaserc en la RAÍZ del repo
+#   2. Secret FIREBASE_SERVICE_ACCOUNT (JSON completo de la clave
+#      privada de la cuenta de servicio)
+#   3. Secrets VITE_FIREBASE_* y VITE_SHEET_DOCENTES_URL (los mismos que usa el deploy de Pages)
+# ============================================================
+
+name: Deploy a Firebase Hosting
+
+on:
+  push:
+    branches: [main] # ← cambia si tu rama principal no se llama main
+  workflow_dispatch:
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código del repo
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26 # ← debe coincidir con la versión MAYOR de tu PC (ej. 22 o 24)
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Compilar la aplicación
+        run: npm run build # genera la carpeta dist/
+        env:
+          # SIN BASE_PATH: Firebase Hosting sirve en la raíz "/" y Vite
+          # usa "/" por defecto. El base de Pages NO debe llegar aquí.
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+
+          # Google Sheets vía Apps Script. SOLO la URL llega al cliente.
+          # SIN token compartido: autenticación por usuario con Firebase Auth
+          # (ver el comentario en deploy-pages.yml y el modelo en INSTALACION.md).
+          VITE_SHEET_DOCENTES_URL: ${{ secrets.VITE_SHEET_DOCENTES_URL }}
+
+      - name: Publicar en Firebase Hosting
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          # Token que GitHub inyecta automáticamente. NO se crea a mano.
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+
+          # Aquí entra TU secret: el JSON entero de la cuenta de servicio.
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+
+          # "live" = publica en el sitio en producción.
+          channelId: live
+
+          # ID real del proyecto Firebase (verificado en la consola)
+          projectId: expediente-en-linea1

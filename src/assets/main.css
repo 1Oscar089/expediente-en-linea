@@ -1,1 +1,13 @@
-@import "tailwindcss";
+/* Tailwind CSS v4 — la configuración vive aquí, no hay tailwind.config.js */
+@import 'tailwindcss';
+
+/* ── Tokens del sistema de diseño ──
+   Generan clases automáticamente: bg-primario, text-eliminar,
+   bg-archivar/10, hover:bg-editar-oscuro… */
+@theme {
+  --color-primario: #0617ff; /* color base y "aceptar" */
+  --color-primario-oscuro: #0410c4; /* hover del primario */
+  --color-eliminar: #dc2626; /* rojo — eliminar */
+  --color-archivar: #eab308; /* amarillo — archivar */
+  --color-editar: #16a34a; /* verde — editar */
+}

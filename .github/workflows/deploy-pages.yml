@@ -1,0 +1,92 @@
+# ============================================================
+# DEPLOY 1: GitHub Pages
+# Publica la app en: https://TU-USUARIO.github.io/expediente-en-linea/
+#
+# REQUISITO (se configura en GitHub, NO en este archivo):
+#   Settings -> Pages -> Build and deployment -> Source: "GitHub Actions"
+#
+# Secrets que usa (Settings -> Secrets and variables -> Actions):
+#   VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID,
+#   VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID,
+#   VITE_FIREBASE_APP_ID, VITE_SHEET_DOCENTES_URL
+#   (SIN token compartido: la autenticación hacia los Sheets es por usuario,
+#   con Firebase Auth — ver el modelo de seguridad en INSTALACION.md)
+# ============================================================
+
+name: Deploy a GitHub Pages
+
+on:
+  push:
+    branches: [main] # ← cambia si tu rama principal no se llama main
+  workflow_dispatch: # permite ejecutarlo a mano desde la pestaña Actions
+
+permissions:
+  contents: read # solo lectura del código
+  pages: write # permiso para escribir en Pages
+  id-token: write # permiso de autenticación interna de Pages
+
+concurrency:
+  group: github-pages # evita que dos deploys simultáneos se pisen
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código del repo
+        uses: actions/checkout@v4
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 26 # ← debe coincidir con la versión MAYOR de tu PC (ej. 22 o 24)
+          cache: npm # acelera; requiere package-lock.json subido al repo
+
+      - name: Instalar dependencias
+        run: npm ci # como npm install, pero exacto según package-lock.json
+
+      - name: Compilar la aplicación
+        run: npm run build # genera la carpeta dist/
+        env:
+          # Pages sirve el sitio en una SUBCARPETA (/expediente-en-linea/),
+          # así que a Vite hay que darle el "base path" SOLO en este deploy.
+          # Firebase Hosting y tu PC sirven en la raíz "/" y no lo necesitan.
+          BASE_PATH: /expediente-en-linea/
+
+          # Variables VITE_ que la app necesita AL COMPILAR.
+          # En CI no existe tu .env.local, por eso llegan como Secrets de GitHub.
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID }}
+
+          # Google Sheets vía Apps Script. SOLO la URL llega al cliente.
+          # SIN token compartido: cada petición se autentica con el ID token
+          # de Firebase Auth del usuario logueado (personal, expira ~1 h) y el
+          # Apps Script lo verifica del lado servidor. Así no existe ningún
+          # secreto estático en el navegador que un insistente pueda robar.
+          VITE_SHEET_DOCENTES_URL: ${{ secrets.VITE_SHEET_DOCENTES_URL }}
+
+      - name: Crear 404.html para las rutas de Vue Router
+        run: cp dist/index.html dist/404.html
+        # Pages solo sabe servir archivos físicos; si recargas una ruta interna
+        # (ej. /alumnos) no encuentra ese archivo y da 404. Con esta copia,
+        # Pages entrega index.html y Vue Router toma el control de la ruta.
+
+      - name: Empaquetar dist para Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist # lo que se publica es SOLO la carpeta dist
+
+  deploy:
+    needs: build # espera a que el job "build" termine bien
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publicar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

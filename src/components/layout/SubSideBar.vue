@@ -1,61 +1,64 @@
 <script setup lang="ts">
-// ─────────────────────────────────────────────────────────────
-// SEGUNDA SIDEBAR con las subsecciones de la sección activa.
-// Los enlaces navegan de verdad (RouterLink) y marca la activa
-// comparando la ruta actual con la de cada subsección.
-// ─────────────────────────────────────────────────────────────
-import { useRoute } from 'vue-router'
 import type { Seccion } from '@/config/menu'
 
-defineProps<{ seccion: Seccion }>()
-defineEmits<{ cerrar: [] }>()
+defineProps<{
+  seccion: Seccion
+  subseccionActiva: string | null
+  sidebarAbierta: boolean
+}>()
 
-const route = useRoute()
+const emit = defineEmits<{
+  (e: 'seleccionar', id: string): void
+  (e: 'cerrar'): void
+}>()
 </script>
 
 <template>
-  <div
-    class="absolute inset-0 flex flex-col bg-white lg:inset-y-0 lg:right-auto lg:left-full lg:w-56 lg:border-l lg:border-slate-200 lg:shadow-xl"
+  <!-- FIXED a todo alto: en teléfono (left-0) queda SOBRE el cajón;
+       en escritorio queda A LA PAR de la sidebar, pegada a su borde derecho
+       (lg:left-64 si está extendida, lg:left-20 si está colapsada en mini). -->
+  <aside
+    class="fixed top-16 bottom-0 left-0 z-50 flex w-64 flex-col border-r border-slate-200 bg-white shadow-xl lg:w-56 lg:shadow-none"
+    :class="sidebarAbierta ? 'lg:left-64' : 'lg:left-20'"
   >
-    <!-- Volver (solo móvil) -->
-    <button
-      type="button"
-      class="flex items-center gap-2 border-b border-slate-200 px-3 py-3 text-sm text-slate-600 hover:bg-slate-50 lg:hidden"
-      @click="$emit('cerrar')"
-    >
-      <svg
-        class="h-4 w-4"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
+    <div class="flex items-center gap-2 border-b border-slate-200 px-3 py-3">
+      <button
+        type="button"
+        class="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-primario-suave hover:text-primario lg:hidden"
+        aria-label="Volver"
+        @click="emit('cerrar')"
       >
-        <path d="m12 19-7-7 7-7" />
-        <path d="M19 12H5" />
-      </svg>
-      Volver
-    </button>
-
-    <p class="px-4 pb-2 pt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">
-      {{ seccion.nombre }}
-    </p>
-
-    <ul class="flex-1 space-y-1 overflow-y-auto p-2">
-      <li v-for="sub in seccion.subsecciones" :key="sub.id">
-        <RouterLink
-          :to="sub.ruta"
-          class="block rounded-lg px-3 py-2 text-sm"
-          :class="
-            route.path === sub.ruta
-              ? 'bg-primario/10 font-medium text-primario'
-              : 'text-slate-700 hover:bg-slate-100'
-          "
+        <svg
+          class="h-5 w-5"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
         >
-          {{ sub.nombre }}
-        </RouterLink>
-      </li>
-    </ul>
-  </div>
+          <path d="m15 18-6-6 6-6" />
+        </svg>
+      </button>
+      <p class="text-sm font-bold text-slate-800">{{ seccion.nombre }}</p>
+    </div>
+
+    <nav class="flex-1 overflow-y-auto p-2">
+      <button
+        v-for="sub in seccion.subsecciones"
+        :key="sub.id"
+        type="button"
+        class="flex w-full items-center rounded-lg px-3 py-2.5 text-sm font-medium transition-colors"
+        :class="
+          subseccionActiva === sub.id
+            ? 'bg-primario-suave font-semibold text-primario'
+            : 'text-slate-600 hover:bg-slate-100 hover:text-primario'
+        "
+        @click="emit('seleccionar', sub.id)"
+      >
+        {{ sub.nombre }}
+      </button>
+    </nav>
+  </aside>
 </template>

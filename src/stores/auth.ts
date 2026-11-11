@@ -1,16 +1,5 @@
-// ─────────────────────────────────────────────────────────────
-// STORE DE AUTENTICACIÓN (Pinia).
-// Dirección: lib/firebase + lib/usuarios → stores → vistas.
-// Reglas:
-//  - Docentes y estudiantes: SOLO Google, SOLO @clases.edu.sv.
-//  - Responsables: correo nie@prados.com + contraseña (DUI sin guion).
-//  - Quien NO existe en Firestore recibe "Aún no está registrado"
-//    y NO queda cuenta en Auth (se elimina la que Google creó).
-// El perfil SIEMPRE lo establece onAuthStateChanged: es la única
-// fuente de verdad (sirve también al recargar la página).
-// ─────────────────────────────────────────────────────────────
-import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
+import { computed, ref } from 'vue'
 import {
   createUserWithEmailAndPassword,
   deleteUser,
@@ -20,124 +9,162 @@ import {
   signOut,
   type User,
 } from 'firebase/auth'
-import { auth, proveedorGoogle } from '@/lib/firebase'
-import { buscarEstudiantePorNie, buscarPerfilInstitucional, type Perfil } from '@/lib/usuarios'
 
-export const DOMINIO_INSTITUCIONAL = '@clases.edu.sv'
-export const DOMINIO_RESPONSABLE = '@prados.com'
+import { auth as fbAuth, proveedorGoogle } from '@/lib/firebase'
+import {
+  buscarEstudiantePorNie,
+  buscarPerfilInstitucional,
+  DOMINIO_INSTITUCIONAL,
+  DOMINIO_RESPONSABLE,
+  type Perfil,
+  type Rol,
+} from '@/lib/usuarios'
+
+function mensajeError(e: unknown): string {
+  const codigo = (e as { code?: string })?.code ?? ''
+  if (
+    codigo === 'auth/invalid-credential' ||
+    codigo === 'auth/wrong-password' ||
+    codigo === 'auth/user-not-found'
+  ) {
+    return 'Correo o contraseña incorrectos.'
+  }
+  if (codigo === 'auth/popup-closed-by-request' || codigo === 'auth/cancelled-popup-request') {
+    return 'Ventana de Google cerrada.'
+  }
+  if (codigo === 'auth/popup-blocked') return 'El navegador bloqueó la ventana de Google.'
+  if (codigo === 'auth/too-many-requests') return 'Demasiados intentos, espera un momento.'
+  if (codigo === 'auth/network-request-failed') return 'Sin conexión.'
+  return 'No se pudo iniciar sesión.'
+}
 
 export const useAuthStore = defineStore('auth', () => {
   const perfil = ref<Perfil | null>(null)
   const cargando = ref(false)
-  const error = ref<string | null>(null)
-  const listo = ref(false) // Firebase ya respondió si había sesión guardada
+  const error = ref('')
+  const listo = ref(false)
 
-  // Al abrir (o recargar) la app: reconstruye el perfil desde Firestore
-  onAuthStateChanged(auth, async (user) => {
-    if (user?.email) {
-      if (user.email.endsWith(DOMINIO_RESPONSABLE)) {
-        // Responsable: su "perfil" vive en el documento del estudiante
-        const estudiante = await buscarEstudiantePorNie(user.email.split('@')[0])
-        perfil.value = estudiante
-          ? { correo: user.email, nombre: estudiante.responsable, rol: 'responsable' }
-          : null
-      } else {
-        perfil.value = await buscarPerfilInstitucional(user.email)
-      }
-      if (!perfil.value) await signOut(auth) // sesión sin perfil: fuera
-    } else {
-      perfil.value = null
-    }
-    listo.value = true
-  })
+  /* Vista provisional: el admin (1) puede mirar la app como 2, 3, 4 o 5.
+     null = está en su propia vista. Solo vive mientras la sesión está abierta. */
+  const vistaRol = ref<Rol | null>(null)
 
   const estaLogueado = computed(() => perfil.value !== null)
+  const esAdmin = computed(() => perfil.value?.rol === 'admin')
+  const rolEfectivo = computed<Rol | null>(() => vistaRol.value ?? perfil.value?.rol ?? null)
 
-  /** Elimina la cuenta recién creada para que no quede en Auth. */
-  async function eliminarSesion(user: User) {
+  /* Reconstruye el perfil al recargar la página */
+  onAuthStateChanged(fbAuth, async (usuario) => {
+    if (!usuario?.email) {
+      perfil.value = null
+      listo.value = true
+      return
+    }
     try {
-      await deleteUser(user)
+      if (usuario.email.endsWith(DOMINIO_RESPONSABLE)) {
+        const encontrado = await buscarEstudiantePorNie(usuario.email.split('@')[0] ?? '')
+        perfil.value = encontrado
+          ? { correo: usuario.email, nombre: encontrado.nombre, rol: 'responsable' }
+          : null
+        if (!encontrado) await signOut(fbAuth)
+      } else {
+        const encontrado = await buscarPerfilInstitucional(usuario.email)
+        perfil.value = encontrado
+        if (!encontrado) await signOut(fbAuth)
+      }
     } catch {
-      await signOut(auth)
+      perfil.value = null
+    } finally {
+      listo.value = true
+    }
+  })
+
+  /* Si el perfil no existe en Firestore, la cuenta creada por Google se elimina */
+  async function limpiarCuentaInvalida(usuario: User) {
+    try {
+      await deleteUser(usuario)
+    } catch {
+      await signOut(fbAuth)
     }
   }
 
-  /** Docentes y estudiantes: Google obligatorio + dominio + Firestore. */
   async function entrarConGoogle() {
-    error.value = null
+    error.value = ''
     cargando.value = true
     try {
-      const resultado = await signInWithPopup(auth, proveedorGoogle)
-      const correo = resultado.user.email ?? ''
+      const resultado = await signInWithPopup(fbAuth, proveedorGoogle)
+      const usuario = resultado.user
+      const correo = usuario.email ?? ''
 
-      // 1) Dominio institucional obligatorio
       if (!correo.endsWith(DOMINIO_INSTITUCIONAL)) {
-        await eliminarSesion(resultado.user)
-        error.value = `Usa tu cuenta institucional ${DOMINIO_INSTITUCIONAL}.`
+        await limpiarCuentaInvalida(usuario)
+        error.value = `Solo se permiten correos ${DOMINIO_INSTITUCIONAL}`
         return
       }
 
-      // 2) Debe existir en Firestore (docentes o estudiantes)
       const encontrado = await buscarPerfilInstitucional(correo)
       if (!encontrado) {
-        await eliminarSesion(resultado.user)
-        error.value = 'Aún no está registrado. Solicite su acceso a la administración.'
+        await limpiarCuentaInvalida(usuario)
+        error.value = 'Aún no está registrado.'
         return
       }
-      // Si pasó las dos pruebas, onAuthStateChanged establece el perfil.
+
+      perfil.value = encontrado
+      error.value = ''
     } catch (e) {
-      const codigo = (e as { code?: string }).code ?? ''
-      error.value =
-        codigo.includes('popup-closed') || codigo.includes('cancelled')
-          ? 'Inicio de sesión cancelado.'
-          : 'No se pudo iniciar sesión con Google.'
+      error.value = mensajeError(e)
     } finally {
       cargando.value = false
     }
   }
 
-  /** Responsables: nie@prados.com + contraseña (DUI sin guion). */
-  async function entrarComoResponsable(correo: string, password: string) {
-    error.value = null
+  async function entrarComoResponsable(correo: string, contraseña: string) {
+    error.value = ''
     cargando.value = true
     try {
-      const limpio = correo.trim().toLowerCase()
-      if (!limpio.endsWith(DOMINIO_RESPONSABLE)) {
-        error.value = `Los responsables ingresan con su correo nie${DOMINIO_RESPONSABLE}.`
+      const correoLimpio = correo.trim().toLowerCase()
+
+      if (!correoLimpio.endsWith(DOMINIO_RESPONSABLE)) {
+        error.value = `El correo debe terminar en ${DOMINIO_RESPONSABLE}`
         return
       }
 
-      // Debe existir el estudiante en Firestore
-      const estudiante = await buscarEstudiantePorNie(limpio.split('@')[0])
-      if (!estudiante) {
-        error.value = 'Aún no está registrado. Solicite su acceso a la administración.'
+      const encontrado = await buscarEstudiantePorNie(correoLimpio.split('@')[0] ?? '')
+      if (!encontrado) {
+        error.value = 'Aún no está registrado.'
         return
       }
 
-      // Intenta entrar; si la cuenta aún no existe en Auth, se crea SOLO
-      // si la contraseña coincide con el DUI del estudiante (sin guiones).
       try {
-        await signInWithEmailAndPassword(auth, limpio, password)
-      } catch {
-        const duiSinGuion = estudiante.dui.replace(/-/g, '').trim()
-        if (password.trim() !== duiSinGuion) {
-          error.value = 'Contraseña incorrecta (es su DUI sin guiones).'
-          return
-        }
-        try {
-          await createUserWithEmailAndPassword(auth, limpio, password)
-        } catch {
-          // La cuenta ya existía con otra contraseña
-          error.value = 'Contraseña incorrecta.'
+        await signInWithEmailAndPassword(fbAuth, correoLimpio, contraseña)
+      } catch (e) {
+        const codigo = (e as { code?: string })?.code ?? ''
+        /* Primera vez: la cuenta de Auth no existe; se crea SOLO si la contraseña coincide con el DUI */
+        if (codigo === 'auth/invalid-credential' && contraseña === encontrado.dui) {
+          await createUserWithEmailAndPassword(fbAuth, correoLimpio, contraseña)
+        } else {
+          throw e
         }
       }
+
+      perfil.value = { correo: correoLimpio, nombre: encontrado.nombre, rol: 'responsable' }
+      error.value = ''
+    } catch (e) {
+      error.value = mensajeError(e)
     } finally {
       cargando.value = false
     }
+  }
+
+  /* Vista provisional del admin: elegir entre las otras 4 */
+  function cambiarVista(rol: Rol) {
+    if (!esAdmin.value) return
+    vistaRol.value = rol === perfil.value?.rol ? null : rol
   }
 
   async function salir() {
-    await signOut(auth) // onAuthStateChanged limpia el perfil
+    vistaRol.value = null
+    await signOut(fbAuth)
+    perfil.value = null
   }
 
   return {
@@ -145,9 +172,13 @@ export const useAuthStore = defineStore('auth', () => {
     cargando,
     error,
     listo,
+    vistaRol,
     estaLogueado,
+    esAdmin,
+    rolEfectivo,
     entrarConGoogle,
     entrarComoResponsable,
+    cambiarVista,
     salir,
   }
 })

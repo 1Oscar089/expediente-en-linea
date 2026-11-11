@@ -1,13 +1,25 @@
-/* Tailwind CSS v4 — la configuración vive aquí, no hay tailwind.config.js */
 @import 'tailwindcss';
 
-/* ── Tokens del sistema de diseño ──
-   Generan clases automáticamente: bg-primario, text-eliminar,
-   bg-archivar/10, hover:bg-editar-oscuro… */
+/* ── Paleta: todo gira alrededor del azul institucional #0617ff, fondo blanco ── */
 @theme {
-  --color-primario: #0617ff; /* color base y "aceptar" */
-  --color-primario-oscuro: #0410c4; /* hover del primario */
-  --color-eliminar: #dc2626; /* rojo — eliminar */
-  --color-archivar: #eab308; /* amarillo — archivar */
-  --color-editar: #16a34a; /* verde — editar */
+  --color-primario: #0617ff; /* azul base (userbar, selección, aceptar) */
+  --color-primario-oscuro: #040fb3; /* sombra del azul para hovers fuertes */
+  --color-primario-suave: #e8ecff; /* tinte azul claro para fondos sutiles */
+
+  /* Colores de acción */
+  --color-aceptar: #0617ff; /* azul     = aceptar */
+  --color-eliminar: #dc2626; /* rojo     = eliminar */
+  --color-archivar: #eab308; /* amarillo = archivar */
+  --color-editar: #16a34a; /* verde    = editar */
+}
+
+/* Base: fondo blanco en toda la app */
+body {
+  @apply bg-white text-slate-800 antialiased;
+}
+
+/* Botones con cursor de puntero (Tailwind v4 lo quitó por defecto; aquí se restaura
+   para TODOS los botones: hamburguesa, sidebar, subsidebar, login, userbar…) */
+button {
+  cursor: pointer;
 }

@@ -29,7 +29,11 @@ const limpiar = (valor: unknown) => String(valor ?? '').trim().toLowerCase()
 
 /* Busca el perfil institucional:
    1) usuarios > docentes > docentes  → rol admin | director | docente
-   2) usuarios > estudiantes > estudiantes → rol estudiante (con grado) */
+   2) usuarios > estudiantes > estudiantes → rol estudiante (con grado)
+
+   Un docente SIN rol en Firebase (o con un rol desconocido) NO inicia
+   sesión: sin rol no hay menú ni permisos y la sidebar/userbar quedarían
+   vacías o a medio funcionar. Ese caso se rechaza como "no registrado". */
 export async function buscarPerfilInstitucional(correo: string): Promise<Perfil | null> {
   const correoBuscado = limpiar(correo)
 
@@ -42,10 +46,12 @@ export async function buscarPerfilInstitucional(correo: string): Promise<Perfil 
   )
   const docente = docentesSnap.docs[0]?.data()
   if (docente) {
+    const rol = limpiar(docente.rol)
+    if (!Object.keys(NOMBRES_ROL).includes(rol)) return null
     return {
       correo: correoBuscado,
       nombre: String(docente.nombre ?? ''),
-      rol: limpiar(docente.rol) as Rol,
+      rol: rol as Rol,
     }
   }
 

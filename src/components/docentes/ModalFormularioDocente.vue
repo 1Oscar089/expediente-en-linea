@@ -26,6 +26,47 @@ function parteLocal(correo: string): string {
   return correo.trim().toLowerCase().split('@')[0] ?? ''
 }
 
+/* ── Máscaras de entrada ──
+   DUI: 00000000-0 — solo dígitos; el guion se agrega y se quita solo.
+   NIP: solo dígitos (mínimo 6, se valida al guardar).
+   Telefono: solo dígitos, exactamente 8 (00000000), sin guion ni espacios.
+   Telefono y Año de servicio van en input de TEXTO para que NO aparezcan
+   las flechas de incremento ni cambien con la rueda del ratón. */
+function soloDigitos(valor: string): string {
+  return valor.replace(/\D/g, '')
+}
+
+function formatearDui(valor: string): string {
+  const d = soloDigitos(valor).slice(0, 9)
+  return d.length > 8 ? `${d.slice(0, 8)}-${d.slice(8)}` : d
+}
+
+function alEscribirDui(evento: Event) {
+  const valor = formatearDui((evento.target as HTMLInputElement).value)
+  form.dui = valor
+  /* se fuerza el valor en el DOM: si el texto filtrado coincide con el valor
+     anterior, Vue no re-pinta el campo y las letras se quedarían dentro */
+  ;(evento.target as HTMLInputElement).value = valor
+}
+
+function alEscribirNip(evento: Event) {
+  const valor = soloDigitos((evento.target as HTMLInputElement).value)
+  form.nip = valor
+  ;(evento.target as HTMLInputElement).value = valor
+}
+
+function alEscribirAnio(evento: Event) {
+  const valor = soloDigitos((evento.target as HTMLInputElement).value)
+  form.anioServicio = valor
+  ;(evento.target as HTMLInputElement).value = valor
+}
+
+function alEscribirTelefono(evento: Event) {
+  const valor = soloDigitos((evento.target as HTMLInputElement).value).slice(0, 8)
+  form.telefono = valor
+  ;(evento.target as HTMLInputElement).value = valor
+}
+
 const form = reactive({
   nombre: props.inicial?.nombre ?? '',
   dui: props.inicial?.dui ?? '',
@@ -54,8 +95,12 @@ const errores = computed(() => {
   const e: Partial<Record<keyof typeof form, string>> = {}
   if (!form.nombre.trim()) e.nombre = 'El nombre es obligatorio.'
   if (!form.dui.trim()) e.dui = 'El DUI es obligatorio.'
+  else if (!/^\d{8}-\d$/.test(form.dui)) e.dui = 'El DUI debe tener el formato 00000000-0.'
   if (!form.nip.trim()) e.nip = 'El NIP es obligatorio.'
+  else if (!/^\d{6,}$/.test(form.nip)) e.nip = 'El NIP debe tener al menos 6 dígitos.'
   if (!form.telefono.trim()) e.telefono = 'El telefono es obligatorio.'
+  else if (!/^\d{8}$/.test(form.telefono))
+    e.telefono = 'El telefono debe tener 8 dígitos (formato 00000000).'
   const local = form.correoLocal.trim().toLowerCase().replace(/^\.+|\.+$/g, '')
   if (!local) e.correoLocal = 'El correo es obligatorio.'
   else if (!/^[a-z0-9._-]+$/.test(local)) {
@@ -122,15 +167,19 @@ function enviar() {
         </label>
         <input
           id="doc-dui"
-          v-model="form.dui"
+          :value="form.dui"
           type="text"
           inputmode="numeric"
           autocomplete="off"
           class="mt-1 w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:ring-2 focus:ring-primario/20"
           :class="claseCampo('dui')"
+          @input="alEscribirDui"
         />
         <p v-if="intentado && errores.dui" class="mt-1 text-xs text-eliminar">
           {{ errores.dui }}
+        </p>
+        <p v-else class="mt-1 text-xs text-slate-400">
+          Formato 00000000-0: el guion se agrega y se quita solo.
         </p>
       </div>
       <div>
@@ -139,16 +188,18 @@ function enviar() {
         </label>
         <input
           id="doc-nip"
-          v-model="form.nip"
+          :value="form.nip"
           type="text"
           inputmode="numeric"
           autocomplete="off"
           class="mt-1 w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:ring-2 focus:ring-primario/20"
           :class="claseCampo('nip')"
+          @input="alEscribirNip"
         />
         <p v-if="intentado && errores.nip" class="mt-1 text-xs text-eliminar">
           {{ errores.nip }}
         </p>
+        <p v-else class="mt-1 text-xs text-slate-400">Solo números, mínimo 6 dígitos.</p>
       </div>
 
       <!-- Telefono / Fecha de nacimiento -->
@@ -158,14 +209,19 @@ function enviar() {
         </label>
         <input
           id="doc-telefono"
-          v-model="form.telefono"
-          type="tel"
+          :value="form.telefono"
+          type="text"
+          inputmode="numeric"
           autocomplete="off"
           class="mt-1 w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:ring-2 focus:ring-primario/20"
           :class="claseCampo('telefono')"
+          @input="alEscribirTelefono"
         />
         <p v-if="intentado && errores.telefono" class="mt-1 text-xs text-eliminar">
           {{ errores.telefono }}
+        </p>
+        <p v-else class="mt-1 text-xs text-slate-400">
+          Formato 00000000: solo números (sin flechas ni scroll).
         </p>
       </div>
       <div>
@@ -184,13 +240,15 @@ function enviar() {
         <label class="text-xs font-semibold text-slate-600" for="doc-anio">Año de servicio</label>
         <input
           id="doc-anio"
-          v-model="form.anioServicio"
-          type="number"
-          min="0"
-          step="1"
+          :value="form.anioServicio"
+          type="text"
+          inputmode="numeric"
+          autocomplete="off"
           class="mt-1 w-full rounded-lg border px-3 py-2 text-sm outline-none transition-colors focus:ring-2 focus:ring-primario/20"
           :class="claseCampo('anioServicio')"
+          @input="alEscribirAnio"
         />
+        <p class="mt-1 text-xs text-slate-400">Solo números (sin flechas ni scroll).</p>
       </div>
       <div>
         <label class="text-xs font-semibold text-slate-600" for="doc-especialidad">Especialidad</label>

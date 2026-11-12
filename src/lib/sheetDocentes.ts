@@ -33,12 +33,29 @@ async function llamarSheet<T extends RespuestaSheet>(
     if (!respuesta.ok) {
       throw new Error(`el Sheet respondió con error HTTP ${respuesta.status}`)
     }
-    const datos = (await respuesta.json()) as T
+    /* Apps Script debe devolver JSON; si devuelve HTML es porque el despliegue
+       no es una Web App pública o la URL no es la que termina en /exec. */
+    const texto = await respuesta.text()
+    let datos: T
+    try {
+      datos = JSON.parse(texto) as T
+    } catch {
+      throw new Error(
+        'la URL del Sheet no responde como Web App. Revisa el despliegue: "Ejecutar como: Yo" y "Quién tiene acceso: Cualquiera", y usa la URL que termina en /exec.',
+      )
+    }
     if (!datos.ok) throw new Error(datos.error || 'el Sheet devolvió un error.')
     return datos
   } catch (e) {
     if ((e as Error)?.name === 'AbortError') {
       throw new Error('el Sheet tardó demasiado en responder.')
+    }
+    if (e instanceof TypeError) {
+      /* "Failed to fetch": Google redirigió a su página de inicio de sesión
+         porque el despliegue NO tiene acceso "Cualquiera". */
+      throw new Error(
+        'no se pudo conectar con el Sheet. En el despliegue de la Web App, "Quién tiene acceso" debe ser "Cualquiera" (no "Cualquier cuenta de Google") y la URL debe terminar en /exec.',
+      )
     }
     throw e
   } finally {
@@ -75,6 +92,10 @@ export async function actualizarEnHoja(
 
 export async function archivarEnHoja(correoBuscada: string): Promise<void> {
   await llamarSheet({ accion: 'archivar', correoBuscada })
+}
+
+export async function restaurarEnHoja(correoBuscada: string): Promise<void> {
+  await llamarSheet({ accion: 'restaurar', correoBuscada })
 }
 
 export async function borrarEnHoja(correoBuscada: string): Promise<void> {

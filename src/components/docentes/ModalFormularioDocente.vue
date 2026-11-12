@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 
 import { sugerirCorreoLocal, type DocenteCompleto } from '@/lib/docentes'
+import { aIsoFecha } from '@/lib/fechas'
 import { NOMBRES_ROL, type Rol } from '@/lib/usuarios'
 
 import ModalBase from '@/components/ui/ModalBase.vue'
@@ -72,7 +73,9 @@ const form = reactive({
   dui: props.inicial?.dui ?? '',
   nip: props.inicial?.nip ?? '',
   telefono: props.inicial?.telefono ?? '',
-  fechaNacimiento: props.inicial?.fechaNacimiento ?? '',
+  /* aIsoFecha normaliza lo que venga del Sheet (p. ej. el texto largo
+     "Wed Apr 03 1968 …") al yyyy-mm-dd que entiende el input de fecha */
+  fechaNacimiento: aIsoFecha(props.inicial?.fechaNacimiento),
   anioServicio: props.inicial?.anioServicio ?? '',
   especialidad: props.inicial?.especialidad ?? '',
   rol: props.inicial?.rol || 'docente',
@@ -125,7 +128,8 @@ function enviar() {
     nip: form.nip.trim(),
     telefono: form.telefono.trim(),
     correo: `${local}@clases.edu.sv`,
-    fechaNacimiento: form.fechaNacimiento.trim(),
+    /* Siempre se guarda yyyy-mm-dd (formato neutro); en pantalla se muestra dd/mm/yyyy */
+    fechaNacimiento: aIsoFecha(form.fechaNacimiento),
     anioServicio: String(form.anioServicio).trim(),
     especialidad: form.especialidad.trim(),
     rol: form.rol,
@@ -233,6 +237,7 @@ function enviar() {
           class="mt-1 w-full rounded-lg border px-3 py-2 text-sm text-slate-700 outline-none transition-colors focus:ring-2 focus:ring-primario/20"
           :class="claseCampo('fechaNacimiento')"
         />
+        <p class="mt-1 text-xs text-slate-400">Formato dd/mm/yyyy.</p>
       </div>
 
       <!-- Año de servicio / Especialidad -->

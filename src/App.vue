@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 import { useAuthStore } from '@/stores/auth'
-import { MENU } from '@/config/menu'
+import { MENU, menuParaRol } from '@/config/menu'
 
 import UserBar from '@/components/layout/UserBar.vue'
 import SideBar from '@/components/layout/SideBar.vue'
@@ -10,6 +10,9 @@ import ContentArea from '@/components/layout/ContentArea.vue'
 import LoginView from '@/views/LoginView.vue'
 import InicioView from '@/views/InicioView.vue'
 import DocentesView from '@/views/DocentesView.vue'
+import MatricularView from '@/views/MatricularView.vue'
+
+import InformacionCeView from '@/views/InformacionCeView.vue'  
 
 /* Nivel proyecto: notificaciones push y capa de carga global */
 import Notificaciones from '@/components/ui/Notificaciones.vue'
@@ -37,6 +40,87 @@ watch(
   () => {
     seccionActiva.value = 'inicio'
     subseccionActiva.value = null
+  },
+)
+
+/* ── Recordar la ubicación (sección + subsección) ──
+   Al recargar la página (o volver a abrir la app) el usuario regresa
+   exactamente donde estaba. Se guarda en localStorage POR USUARIO: en
+   equipos compartidos cada quien vuelve a SU último punto. Antes de
+   restaurar se valida contra el menú del rol vigente — si la sección ya
+   no existe o el rol cambió, se arranca en Inicio sin errores. Al cerrar
+   sesión se borra, para que el siguiente usuario empiece de cero. */
+const CLAVE_UBICACION = 'expediente.ubicacion'
+
+interface Ubicacion {
+  s: string // id de la sección (ej. 'estudiantes')
+  sub: string | null // id de la subsección, si aplica (ej. 'matricular')
+  u: string // correo del dueño de esta ubicación
+}
+
+function guardarUbicacion(): void {
+  try {
+    const dato: Ubicacion = {
+      s: seccionActiva.value,
+      sub: subseccionActiva.value,
+      u: auth.perfil?.correo ?? '',
+    }
+    localStorage.setItem(CLAVE_UBICACION, JSON.stringify(dato))
+  } catch {
+    /* Sin almacenamiento disponible: la app funciona normal, solo no recuerda */
+  }
+}
+
+function leerUbicacion(): Ubicacion | null {
+  try {
+    const crudo = localStorage.getItem(CLAVE_UBICACION)
+    if (!crudo) return null
+    const dato = JSON.parse(crudo) as Partial<Ubicacion>
+    if (typeof dato.s !== 'string' || typeof dato.u !== 'string') return null
+    return { s: dato.s, sub: typeof dato.sub === 'string' ? dato.sub : null, u: dato.u }
+  } catch {
+    return null
+  }
+}
+
+/* La ubicación guardada solo vale si es del usuario en sesión y el menú
+   de su rol efectivo todavía la contiene (sección y subsección). */
+function ubicacionRecuperable(dato: Ubicacion): boolean {
+  if (dato.u !== (auth.perfil?.correo ?? '')) return false
+  const seccion = menuParaRol(auth.rolEfectivo).find((s) => s.id === dato.s)
+  if (!seccion) return false
+  if (dato.sub && !seccion.subsecciones?.some((sub) => sub.id === dato.sub)) return false
+  return true
+}
+
+/* Recarga o reapertura: apenas la sesión está lista, volver al punto guardado.
+   immediate:true cubre también la sesión ya activa (no hay cambio que disparar). */
+watch(
+  () => auth.listo && auth.estaLogueado,
+  (activo) => {
+    if (!activo) return
+    const guardada = leerUbicacion()
+    if (guardada && ubicacionRecuperable(guardada)) {
+      seccionActiva.value = guardada.s
+      subseccionActiva.value = guardada.sub
+    }
+  },
+  { immediate: true },
+)
+
+/* Cada movimiento por el menú deja anotada la ubicación */
+watch([seccionActiva, subseccionActiva], guardarUbicacion)
+
+/* Cerrar sesión borra la ubicación: el siguiente usuario empieza en Inicio */
+watch(
+  () => auth.estaLogueado,
+  (logueado) => {
+    if (logueado) return
+    try {
+      localStorage.removeItem(CLAVE_UBICACION)
+    } catch {
+      /* nada que hacer sin almacenamiento */
+    }
   },
 )
 
@@ -97,6 +181,13 @@ function cerrarSiMovil() {
       <ContentArea :titulo="tituloActivo" :subtitulo="subtituloActivo">
         <InicioView v-if="seccionActiva === 'inicio'" />
         <DocentesView v-else-if="seccionActiva === 'docentes'" />
+        <!-- 2) En el <ContentArea>, añade esta rama después de MatricularView -->
+        <MatricularView
+          v-else-if="seccionActiva === 'estudiantes' && subseccionActiva === 'matricular'"
+        />
+        <InformacionCeView
+          v-else-if="seccionActiva === 'configuracion' && subseccionActiva === 'informacion-ce'"
+        />
       </ContentArea>
     </div>
   </div>

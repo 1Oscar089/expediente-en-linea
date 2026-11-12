@@ -68,6 +68,7 @@ jobs:
           # Apps Script lo verifica del lado servidor. Así no existe ningún
           # secreto estático en el navegador que un insistente pueda robar.
           VITE_SHEET_DOCENTES_URL: ${{ secrets.VITE_SHEET_DOCENTES_URL }}
+          VITE_SHEET_CONFIGURACION_URL: ${{ secrets.VITE_SHEET_CONFIGURACION_URL }}
 
       - name: Crear 404.html para las rutas de Vue Router
         run: cp dist/index.html dist/404.html

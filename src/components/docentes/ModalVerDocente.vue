@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 
 import type { DocenteCompleto } from '@/lib/docentes'
+import { fechaCorta } from '@/lib/fechas'
 import { NOMBRES_ROL, type Rol } from '@/lib/usuarios'
 
 import ModalBase from '@/components/ui/ModalBase.vue'
@@ -25,7 +26,7 @@ const filas = computed(() => {
     { etiqueta: 'NIP', valor: d.nip },
     { etiqueta: 'Telefono', valor: d.telefono },
     { etiqueta: 'Correo', valor: d.correo },
-    { etiqueta: 'Fecha de nacimiento', valor: d.fechaNacimiento },
+    { etiqueta: 'Fecha de nacimiento', valor: fechaCorta(d.fechaNacimiento) },
     { etiqueta: 'Año de servicio', valor: d.anioServicio },
     { etiqueta: 'Especialidad', valor: d.especialidad },
     { etiqueta: 'Rol', valor: rolValido ? NOMBRES_ROL[d.rol as Rol] : d.rol },

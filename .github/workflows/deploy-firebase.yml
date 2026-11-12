@@ -48,6 +48,7 @@ jobs:
           # SIN token compartido: autenticación por usuario con Firebase Auth
           # (ver el comentario en deploy-pages.yml y el modelo en INSTALACION.md).
           VITE_SHEET_DOCENTES_URL: ${{ secrets.VITE_SHEET_DOCENTES_URL }}
+          VITE_SHEET_CONFIGURACION_URL: ${{ secrets.VITE_SHEET_CONFIGURACION_URL }}
 
       - name: Publicar en Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0

@@ -11,8 +11,7 @@ import LoginView from '@/views/LoginView.vue'
 import InicioView from '@/views/InicioView.vue'
 import DocentesView from '@/views/DocentesView.vue'
 import MatricularView from '@/views/MatricularView.vue'
-
-import InformacionCeView from '@/views/InformacionCeView.vue'  
+import InformacionCeView from '@/views/InformacionCeView.vue'
 
 /* Nivel proyecto: notificaciones push y capa de carga global */
 import Notificaciones from '@/components/ui/Notificaciones.vue'
@@ -159,8 +158,14 @@ function cerrarSiMovil() {
   <!-- Estado 2: sin sesión -->
   <LoginView v-else-if="!auth.estaLogueado" />
 
-  <!-- Estado 3: layout -->
-  <div v-else class="flex min-h-dvh flex-col bg-white">
+  <!-- Estado 3: layout.
+       REGLA DE SCROLL DEL PROYECTO: la app mide EXACTAMENTE una pantalla
+       (h-dvh) y nada se sale de ella. La userbar, el nombre del panel y la
+       sidebar SIEMPRE se ven; el ÚNICO scroll es el del rectángulo de
+       contenido (ContentArea). Por eso la raíz es h-dvh + overflow-hidden:
+       si fuera min-h-dvh, el contenido crecería y la página entera
+       (userbar, título, sidebar) se correría hacia arriba al hacer scroll. -->
+  <div v-else class="flex h-dvh flex-col overflow-hidden bg-white">
     <UserBar @alternar-sidebar="sidebarAbierta = !sidebarAbierta" />
 
     <!-- La sidebar es FIXED, así que el contenido se corre según su ancho real:
@@ -181,7 +186,6 @@ function cerrarSiMovil() {
       <ContentArea :titulo="tituloActivo" :subtitulo="subtituloActivo">
         <InicioView v-if="seccionActiva === 'inicio'" />
         <DocentesView v-else-if="seccionActiva === 'docentes'" />
-        <!-- 2) En el <ContentArea>, añade esta rama después de MatricularView -->
         <MatricularView
           v-else-if="seccionActiva === 'estudiantes' && subseccionActiva === 'matricular'"
         />

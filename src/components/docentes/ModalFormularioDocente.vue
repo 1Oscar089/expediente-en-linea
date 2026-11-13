@@ -2,15 +2,23 @@
 import { computed, reactive, ref, watch } from 'vue'
 
 import { sugerirCorreoLocal, type DocenteCompleto } from '@/lib/docentes'
+import { usarBorrador } from '@/lib/borrador'
 import { aIsoFecha } from '@/lib/fechas'
 import { NOMBRES_ROL, type Rol } from '@/lib/usuarios'
 
 import ModalBase from '@/components/ui/ModalBase.vue'
+import ModalConfirmacion from '@/components/ui/ModalConfirmacion.vue'
 
 /* Formulario de docente: sirve para AGREGAR y para EDITAR.
    El correo se sugiere solo mientras se escribe el nombre
    (nombre[0].nombre[1].nombre[2], todo en minúsculas);
-   la parte fija @clases.edu.sv NO es modificable, lo demás sí. */
+   la parte fija @clases.edu.sv NO es modificable, lo demás sí.
+
+   BORRADOR LOCAL: mientras se escribe, todo queda en el navegador; si la
+   computadora se apaga o hay un fallo, al reabrir el formulario se pregunta
+   (ACEPTAR borra lo editado y empieza limpio; CANCELAR recupera los datos).
+   En AGREGAR la clave es propia de la vista; en EDITAR incluye el correo del
+   docente, para que cada formulario recupere SOLO su propio borrador. */
 const props = defineProps<{
   modo: 'agregar' | 'editar'
   inicial?: DocenteCompleto
@@ -85,6 +93,78 @@ const form = reactive({
 /* En editar se respeta el correo existente hasta que el usuario lo toque */
 const correoTocado = ref(props.modo === 'editar')
 
+/* ── Borrador local: punto de partida del formulario ──
+   El formulario arranca EXACTAMENTE con estos valores; si algo difiere,
+   hay cambios sin guardar y quedan protegidos en el navegador. */
+const INICIAL = {
+  nombre: props.inicial?.nombre ?? '',
+  dui: props.inicial?.dui ?? '',
+  nip: props.inicial?.nip ?? '',
+  telefono: props.inicial?.telefono ?? '',
+  fechaNacimiento: aIsoFecha(props.inicial?.fechaNacimiento),
+  anioServicio: props.inicial?.anioServicio ?? '',
+  especialidad: props.inicial?.especialidad ?? '',
+  rol: props.inicial?.rol || 'docente',
+  correoLocal: parteLocal(props.inicial?.correo ?? ''),
+}
+const CORREO_TOCADO_INICIAL = props.modo === 'editar'
+
+function hayCambios(): boolean {
+  return (
+    JSON.stringify({ ...form, tocado: correoTocado.value }) !==
+    JSON.stringify({ ...INICIAL, tocado: CORREO_TOCADO_INICIAL })
+  )
+}
+
+const {
+  modalAbierto: modalBorrador,
+  textos: textosBorrador,
+  vigilar: vigilarBorrador,
+  revisarAlEntrar: revisarBorradorAlEntrar,
+  olvidar: olvidarBorrador,
+  aceptar: aceptarBorrador,
+  seguir: seguirBorrador,
+  pedirCancelar: pedirCancelarBorrador,
+} = usarBorrador(
+  props.modo === 'agregar'
+    ? 'docentes-agregar'
+    : `docentes-editar:${(props.inicial?.correo ?? '').toLowerCase()}`,
+  {
+    capturar: () => (hayCambios() ? { datos: { ...form }, tocado: correoTocado.value } : null),
+    restaurar: (datos) => {
+      Object.assign(form, { ...INICIAL, ...datos.datos })
+      correoTocado.value = datos.tocado
+    },
+    limpiar: (motivo) => {
+      if (motivo === 'cancelar') {
+        /* Cancelación aceptada: se limpia TODO y el formulario se cierra */
+        emit('cerrar')
+        return
+      }
+      /* Recarga aceptada: el formulario queda limpio, listo para usarse */
+      Object.assign(form, { ...INICIAL })
+      correoTocado.value = CORREO_TOCADO_INICIAL
+      intentado.value = false
+    },
+  },
+)
+
+/* Cada tecla queda en el local al instante */
+vigilarBorrador(() => [form, correoTocado.value])
+
+/* Al abrir el formulario: si quedó borrador de antes, se pide la reconfirmación */
+revisarBorradorAlEntrar()
+
+/* Cancelar: si se escribió algo, pide confirmación; si está tal cual
+   empezó, cierra sin preguntar. */
+function cancelar() {
+  if (hayCambios()) {
+    pedirCancelarBorrador()
+    return
+  }
+  emit('cerrar')
+}
+
 watch(
   () => form.nombre,
   (nombre) => {
@@ -135,6 +215,8 @@ function enviar() {
     rol: form.rol,
     estado: props.inicial?.estado || 'activo',
   }
+  /* El formulario salió de este formulario: su borrador local ya no hace falta */
+  olvidarBorrador()
   emit('guardar', datos, props.modo === 'editar' ? props.inicial?.correo : undefined)
 }
 </script>
@@ -316,7 +398,7 @@ function enviar() {
       <button
         type="button"
         class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-        @click="emit('cerrar')"
+        @click="cancelar"
       >
         Cancelar
       </button>
@@ -329,4 +411,16 @@ function enviar() {
       </button>
     </div>
   </ModalBase>
+
+  <!-- Reconfirmación del borrador (recarga o cancelación):
+       ACEPTAR borra lo editado del local; CANCELAR recupera / deja seguir. -->
+  <ModalConfirmacion
+    v-if="modalBorrador"
+    :titulo="textosBorrador.titulo"
+    :texto="textosBorrador.texto"
+    :confirmar-texto="textosBorrador.boton"
+    :tono="textosBorrador.tono"
+    @confirmar="aceptarBorrador"
+    @cerrar="seguirBorrador"
+  />
 </template>

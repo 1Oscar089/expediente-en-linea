@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue'
 
 import { useUiStore } from '@/stores/ui'
+import { usarBorrador } from '@/lib/borrador'
 import {
   INFO_CE_VACIA,
   guardarInfoCE,
@@ -10,6 +11,8 @@ import {
   sheetConfigurado,
   type InfoCE,
 } from '@/lib/sheetConfiguracion'
+
+import ModalConfirmacion from '@/components/ui/ModalConfirmacion.vue'
 
 /* ── Configuración › Información CE ──
    Los datos del centro viven en el Sheet de configuración (hoja
@@ -46,7 +49,42 @@ const info = ref<InfoCE>({ ...INFO_CE_VACIA })
 const borrador = ref<InfoCE>({ ...INFO_CE_VACIA })
 const editando = ref(false)
 
+/* ¿Hay cambios escritos que aún no se han guardado en el Sheet? */
+function cambiosSinGuardar(): boolean {
+  return editando.value && JSON.stringify(borrador.value) !== JSON.stringify(info.value)
+}
+
+/* ── Borrador local (caché por si se apaga la computadora o hay un fallo) ──
+   Mientras se edita la tarjeta, cada cambio queda guardado en el navegador.
+   La clave es POR USUARIO (equipo compartido: cada quien recupera lo suyo). */
+const {
+  modalAbierto: modalBorrador,
+  textos: textosBorrador,
+  vigilar: vigilarBorrador,
+  revisarAlEntrar: revisarBorradorAlEntrar,
+  aceptar: aceptarBorrador,
+  seguir: seguirBorrador,
+  pedirCancelar: pedirCancelarBorrador,
+} = usarBorrador('configuracion-informacion-ce', {
+  capturar: () => (cambiosSinGuardar() ? { datos: { ...borrador.value } } : null),
+  restaurar: (datos) => {
+    editando.value = true
+    borrador.value = { ...INFO_CE_VACIA, ...datos.datos }
+  },
+  limpiar: () => {
+    editando.value = false
+    borrador.value = { ...info.value }
+  },
+})
+
+/* Cada cambio en la tarjeta (activar edición, escribir un campo) queda en el local */
+vigilarBorrador(() => [editando.value, borrador.value])
+
 onMounted(async () => {
+  /* Borrador local: si quedó edición sin terminar (apagón u otro fallo),
+     se abre la reconfirmación de recarga: Aceptar limpia, Cancelar recupera. */
+  revisarBorradorAlEntrar()
+
   /* Sin llamadas de más: si ya se leyó en esta recarga, se usa la caché */
   const guardada = infoCEGuardada()
   if (guardada) {
@@ -69,8 +107,13 @@ function empezarEdicion() {
   editando.value = true
 }
 
-/* Cancelar descarta los cambios hechos en la tarjeta */
+/* Cancelar: si se escribió algo se pide confirmación (ACEPTAR borra lo
+   editado, también la copia local); si no hay cambios, descarta sin más. */
 function cancelarEdicion() {
+  if (cambiosSinGuardar()) {
+    pedirCancelarBorrador()
+    return
+  }
   editando.value = false
 }
 
@@ -162,4 +205,16 @@ async function guardarCambios() {
       </div>
     </dl>
   </div>
+
+  <!-- Reconfirmación del borrador (recarga con edición a medias o cancelación):
+       ACEPTAR borra lo editado del local y queda limpio; CANCELAR recupera. -->
+  <ModalConfirmacion
+    v-if="modalBorrador"
+    :titulo="textosBorrador.titulo"
+    :texto="textosBorrador.texto"
+    :confirmar-texto="textosBorrador.boton"
+    :tono="textosBorrador.tono"
+    @confirmar="aceptarBorrador"
+    @cerrar="seguirBorrador"
+  />
 </template>

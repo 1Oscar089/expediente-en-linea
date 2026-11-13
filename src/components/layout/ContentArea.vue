@@ -6,9 +6,11 @@ defineProps<{
 </script>
 
 <template>
-  <!-- Content: título + espacio de contenido. Margen mínimo, casi llena su espacio. -->
+  <!-- Content: título + espacio de contenido. Margen mínimo, casi llena su espacio.
+     El título NO se desplaza con el scroll: la única zona con scroll es la
+     sección de abajo (el rectángulo de contenido). -->
   <main class="flex min-w-0 flex-1 flex-col gap-2 overflow-hidden p-2 md:p-3">
-    <header class="flex items-baseline gap-2 px-1">
+    <header class="flex shrink-0 items-baseline gap-2 px-1">
       <h1 class="text-lg font-bold text-slate-900">{{ titulo }}</h1>
       <span v-if="subtitulo" class="text-sm font-semibold text-primario">{{ subtitulo }}</span>
     </header>

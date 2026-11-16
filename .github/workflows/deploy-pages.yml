@@ -8,7 +8,8 @@
 # Secrets que usa (Settings -> Secrets and variables -> Actions):
 #   VITE_FIREBASE_API_KEY, VITE_FIREBASE_AUTH_DOMAIN, VITE_FIREBASE_PROJECT_ID,
 #   VITE_FIREBASE_STORAGE_BUCKET, VITE_FIREBASE_MESSAGING_SENDER_ID,
-#   VITE_FIREBASE_APP_ID, VITE_SHEET_DOCENTES_URL
+#   VITE_FIREBASE_APP_ID, VITE_SHEET_DOCENTES_URL, VITE_SHEET_CONFIGURACION_URL,
+#   VITE_SHEET_ESTUDIANTES_URL
 #   (SIN token compartido: la autenticación hacia los Sheets es por usuario,
 #   con Firebase Auth — ver el modelo de seguridad en INSTALACION.md)
 # ============================================================
@@ -70,6 +71,11 @@ jobs:
           VITE_SHEET_DOCENTES_URL: ${{ secrets.VITE_SHEET_DOCENTES_URL }}
           VITE_SHEET_CONFIGURACION_URL: ${{ secrets.VITE_SHEET_CONFIGURACION_URL }}
 
+          # Módulo estudiantes (matrícula + Actualizar). MISMA regla que los
+          # anteriores: si esta línea falta, el build sale sin la URL y la
+          # vista Actualizar muestra el aviso "Falta configurar la URL…".
+          VITE_SHEET_ESTUDIANTES_URL: ${{ secrets.VITE_SHEET_ESTUDIANTES_URL }}
+
       - name: Crear 404.html para las rutas de Vue Router
         run: cp dist/index.html dist/404.html
         # Pages solo sabe servir archivos físicos; si recargas una ruta interna
@@ -81,10 +87,6 @@ jobs:
         with:
           path: dist # lo que se publica es SOLO la carpeta dist
 
-      - name: Build
-        run: npm run build
-        env:
-          VITE_SHEET_ESTUDIANTES_URL: ${{ secrets.VITE_SHEET_ESTUDIANTES_URL }}
   deploy:
     needs: build # espera a que el job "build" termine bien
     runs-on: ubuntu-latest
@@ -95,4 +97,3 @@ jobs:
       - name: Publicar en GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-    

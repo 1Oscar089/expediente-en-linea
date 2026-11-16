@@ -6,7 +6,9 @@
 #   1. firebase.json y .firebaserc en la RAÍZ del repo
 #   2. Secret FIREBASE_SERVICE_ACCOUNT (JSON completo de la clave
 #      privada de la cuenta de servicio)
-#   3. Secrets VITE_FIREBASE_* y VITE_SHEET_DOCENTES_URL (los mismos que usa el deploy de Pages)
+#   3. Secrets VITE_FIREBASE_*, VITE_SHEET_DOCENTES_URL,
+#      VITE_SHEET_CONFIGURACION_URL y VITE_SHEET_ESTUDIANTES_URL (los mismos
+#      que usa el deploy de Pages)
 # ============================================================
 
 name: Deploy a Firebase Hosting
@@ -49,6 +51,11 @@ jobs:
           # (ver el comentario en deploy-pages.yml y el modelo en INSTALACION.md).
           VITE_SHEET_DOCENTES_URL: ${{ secrets.VITE_SHEET_DOCENTES_URL }}
           VITE_SHEET_CONFIGURACION_URL: ${{ secrets.VITE_SHEET_CONFIGURACION_URL }}
+
+          # Módulo estudiantes (matrícula + Actualizar). MISMA regla que los
+          # anteriores: si esta línea falta, el build sale sin la URL y la
+          # vista Actualizar muestra el aviso "Falta configurar la URL…".
+          VITE_SHEET_ESTUDIANTES_URL: ${{ secrets.VITE_SHEET_ESTUDIANTES_URL }}
 
       - name: Publicar en Firebase Hosting
         uses: FirebaseExtended/action-hosting-deploy@v0

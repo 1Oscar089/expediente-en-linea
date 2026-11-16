@@ -499,7 +499,7 @@ function caserioEnModoSelect(): boolean {
         <h2 class="text-2xl font-bold">Actualizar datos de un estudiante</h2>
         <p class="text-slate-500">
           Elige el nivel de la matrícula que quieres editar. Después se elige la parte y el
-          estudiante: así solo se carga lo que se va a modificar.
+          estudiante,
         </p>
       </header>
       <div

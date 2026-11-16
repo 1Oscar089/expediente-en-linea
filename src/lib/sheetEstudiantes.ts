@@ -26,6 +26,8 @@ export const HOJA_PRIMERA_INFANCIA = 'primera infancia'
 export const HOJA_BASICA = 'basica'
 export type HojaEstudiante = typeof HOJA_PRIMERA_INFANCIA | typeof HOJA_BASICA
 
+console.log('URL del Sheet =', import.meta.env.VITE_SHEET_ESTUDIANTES_URL)
+
 interface RespuestaSheet {
   ok?: boolean
   error?: string

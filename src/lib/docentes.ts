@@ -4,11 +4,15 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
+  query,
   setDoc,
   updateDoc,
+  where,
 } from 'firebase/firestore'
 
 import { db } from '@/lib/firebase'
+import { nombreCanonicoDeGrado } from './estudiantes'
 import { guardarCache, leerCache } from './cache'
 
 /* ── Docentes ──
@@ -133,6 +137,34 @@ export async function cambiarEstadoDocente(
 
 export async function eliminarDocente(id: string): Promise<void> {
   await deleteDoc(doc(db, 'usuarios', 'docentes', 'docentes', id))
+}
+
+/* ── Grados a cargo (para la Nómina) ──
+   El campo 'gradosACargo' del documento del docente guarda UNO o MÁS grados,
+   como arreglo ["Segundo", "Tercero"] o como texto "Segundo, Tercero". Cada
+   valor se equipara al catálogo de grados sin importar mayúsculas ni tildes
+   (los que no correspondan a ningún grado se descartan).
+   [] o campo ausente = sin grados asignados: la Nómina le muestra TODOS. */
+export async function gradosDeDocente(correo: string): Promise<string[]> {
+  const buscada = correo.trim().toLowerCase()
+  if (!buscada) return []
+  const snap = await getDocs(
+    query(
+      collection(db, 'usuarios', 'docentes', 'docentes'),
+      where('correo', '==', buscada),
+      limit(1),
+    ),
+  )
+  const datos = snap.docs[0]?.data()
+  if (!datos) return []
+  const bruto = datos['gradosACargo']
+  const lista: unknown[] = Array.isArray(bruto) ? bruto : String(bruto ?? '').split(/[,;]+/)
+  const grados: string[] = []
+  for (const valor of lista) {
+    const nombre = nombreCanonicoDeGrado(String(valor))
+    if (nombre && !grados.includes(nombre)) grados.push(nombre)
+  }
+  return grados
 }
 
 /* Campos de pantalla que cambian entre dos registros (el correo se compara limpio) */

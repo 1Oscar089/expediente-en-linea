@@ -14,7 +14,12 @@
 //      el viejo — el id no importa, los datos sí.
 // El borrador local (regla del proyecto) protege lo escrito mientras se
 // edita: recarga, cancelación y caché por usuario.
-// ─────────────────────────────────────────────────────────────
+// Reglas de acceso: la búsqueda vive SOLO en la hoja del nivel elegido
+// (primera infancia → "primera infancia"; básica → "basica") y el GRADO
+// ("Grado que cursa") solo lo pueden cambiar admin y director — para un
+// docente llega bloqueado y el guardado ignora cualquier cambio suyo.
+// Al GUARDAR BIEN se borra la copia local del borrador y el flujo vuelve
+// al PASO 1 (elegir nivel) con todo limpio: nada queda "sin guardar".
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import ModalConfirmacion from '@/components/ui/ModalConfirmacion.vue'
@@ -56,9 +61,15 @@ import {
   sheetEstudiantesConfigurado,
   type CoincidenciaFila,
 } from '@/lib/sheetEstudiantes'
+import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 
 const ui = useUiStore()
+const auth = useAuthStore()
+
+/* El GRADO solo lo cambian admin y director (regla del usuario). El docente
+   lo ve bloqueado; al guardar se le descarta cualquier cambio de grado. */
+const puedeCambiarGrado = computed(() => auth.rolEfectivo === 'admin' || auth.rolEfectivo === 'director')
 
 /* ── Paso 1: el nivel ── */
 const NIVELES: { id: NivelEstudiante; nombre: string; descripcion: string }[] = [
@@ -202,6 +213,9 @@ async function guardar(): Promise<void> {
     return
   }
   const cambios = cambiosDesde(parte.value, valores, fila.value)
+  /* Defensa extra: aunque el campo llegara cambiado (p. ej. por un borrador
+     viejo), un docente NO puede mover el grado. */
+  if (!puedeCambiarGrado.value) delete cambios['Grado que cursa']
   if (Object.keys(cambios).length === 0) {
     ui.notificar('precaucion', 'No hay cambios por guardar: todo está igual que en el Sheet.')
     return
@@ -236,6 +250,12 @@ async function guardar(): Promise<void> {
       'exito',
       `Cambios guardados en el Sheet (fila ${elegido.value.fila} de "${elegido.value.hoja}") y en Firebase.`,
     )
+    /* Guardado OK: la copia local del borrador ya no hace falta (todo quedó
+       en el Sheet y en Firebase) y el flujo vuelve al PASO 1 con todo
+       limpio. Así el borrador nunca anuncia "Datos sin guardar" por algo
+       que ya está guardado. */
+    olvidarBorrador()
+    quedarseLimpio()
   } catch (e) {
     ui.notificar('error', `No se pudo guardar: ${mensajeError(e)}`)
   } finally {
@@ -267,6 +287,7 @@ const {
   aceptar: aceptarBorrador,
   seguir: seguirBorrador,
   pedirCancelar: pedirCancelarBorrador,
+  olvidar: olvidarBorrador,
 } = usarBorrador('actualizar', {
   capturar: (): BorradorActualizar | null => {
     if (!nivel.value || !parte.value || !elegido.value) return null
@@ -342,11 +363,16 @@ function claseCuadro(marcada: boolean, clave: string): string {
 }
 
 /* Las partes de persona (apagarConNo) desactivan TODO cuando la respuesta
-   inicial es "No" — igual que la matrícula. */
+   inicial es "No" — igual que la matrícula. Además el GRADO llega bloqueado
+   para quien no es admin ni director. */
 function apagado(campo: Campo): boolean {
   const regla = parte.value?.apagarConNo
   if (!regla || campo.clave === regla) return false
   return textoDe(valores, regla) !== 'Sí'
+}
+
+function bloqueado(campo: Campo): boolean {
+  return apagado(campo) || (campo.clave === 'grado' && !puedeCambiarGrado.value)
 }
 
 function opciones(campo: Campo): string[] {
@@ -499,7 +525,7 @@ function caserioEnModoSelect(): boolean {
         <h2 class="text-2xl font-bold">Actualizar datos de un estudiante</h2>
         <p class="text-slate-500">
           Elige el nivel de la matrícula que quieres editar. Después se elige la parte y el
-          estudiante,
+          estudiante: así solo se carga lo que se va a modificar.
         </p>
       </header>
       <div
@@ -609,8 +635,8 @@ function caserioEnModoSelect(): boolean {
             :class="claseCampo('')"
           />
           <p class="mt-1 text-xs text-slate-400">
-            Busca en el Sheet del nivel ({{ hojaDeNivel(nivel!) }}), entre los nombres guardados.
-            La búsqueda arranca a partir de {{ LETRAS_MINIMAS }} letras.
+            Busca SOLO entre los estudiantes del nivel elegido (hoja "{{ hojaDeNivel(nivel!) }}"
+            del libro). La búsqueda arranca a partir de {{ LETRAS_MINIMAS }} letras.
           </p>
         </div>
 
@@ -702,7 +728,7 @@ function caserioEnModoSelect(): boolean {
                         :name="`a-${campo.clave}`"
                         :value="opcion"
                         :checked="valorTexto(campo.clave) === opcion"
-                        :disabled="apagado(campo)"
+                        :disabled="bloqueado(campo)"
                         class="h-4 w-4 accent-primario"
                         @change="alEleccion(campo, opcion)"
                       />
@@ -713,7 +739,7 @@ function caserioEnModoSelect(): boolean {
                     v-else
                     :id="`a-${campo.clave}`"
                     :value="valorTexto(campo.clave)"
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @change="alSelect(campo, $event)"
                   >
@@ -728,6 +754,12 @@ function caserioEnModoSelect(): boolean {
                       {{ opcion }}
                     </option>
                   </select>
+                  <p
+                    v-if="campo.clave === 'grado' && !puedeCambiarGrado"
+                    class="mt-1 text-xs text-amber-600"
+                  >
+                    Solo admin o director pueden cambiar el grado.
+                  </p>
                   <p v-if="campo.nota" class="mt-1 text-xs text-slate-400">{{ campo.nota }}</p>
                   <p v-if="eError(campo.clave)" class="mt-1 text-xs text-red-600">
                     {{ eError(campo.clave) }}
@@ -749,7 +781,7 @@ function caserioEnModoSelect(): boolean {
                       <input
                         type="checkbox"
                         :checked="marcada(campo.clave, opcion)"
-                        :disabled="apagado(campo)"
+                        :disabled="bloqueado(campo)"
                         class="mt-0.5 h-4 w-4 accent-primario"
                         @change="alMarca(campo, opcion)"
                       />
@@ -767,7 +799,7 @@ function caserioEnModoSelect(): boolean {
                     <input
                       type="checkbox"
                       :checked="valorTexto(campo.clave) === campo.marcar"
-                      :disabled="apagado(campo)"
+                      :disabled="bloqueado(campo)"
                       class="mt-0.5 h-4 w-4 accent-primario"
                       @change="alCasilla(campo)"
                     />
@@ -790,7 +822,7 @@ function caserioEnModoSelect(): boolean {
                     type="date"
                     :max="hoyISO"
                     :value="valorTexto(campo.clave)"
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @change="alFecha(campo, $event)"
                   />
@@ -811,7 +843,7 @@ function caserioEnModoSelect(): boolean {
                   <select
                     :id="`a-${campo.clave}`"
                     :value="valorTexto(campo.clave)"
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @change="alCodigoTel(campo, $event)"
                   >
@@ -835,7 +867,7 @@ function caserioEnModoSelect(): boolean {
                     v-if="cantonEnModoSelect(campo)"
                     :id="`a-${campo.clave}`"
                     :value="valorTexto(campo.clave)"
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @change="alCanton(campo, $event)"
                   >
@@ -851,7 +883,7 @@ function caserioEnModoSelect(): boolean {
                     type="text"
                     autocomplete="off"
                     placeholder="Escribe el cantón"
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @input="alCantonTexto(campo, $event)"
                   />
@@ -870,7 +902,7 @@ function caserioEnModoSelect(): boolean {
                     v-if="caserioEnModoSelect()"
                     :id="`a-${campo.clave}`"
                     :value="valorTexto(campo.clave)"
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @change="alCaserioSelect(campo, $event)"
                   >
@@ -885,7 +917,7 @@ function caserioEnModoSelect(): boolean {
                       type="text"
                       autocomplete="off"
                       placeholder="Escribe el caserío (o marca N/A)"
-                      :disabled="apagado(campo) || valorTexto(campo.clave) === NA"
+                      :disabled="bloqueado(campo) || valorTexto(campo.clave) === NA"
                       :class="claseCampo(campo.clave)"
                       @input="alCaserioTexto(campo, $event)"
                     />
@@ -897,7 +929,7 @@ function caserioEnModoSelect(): boolean {
                           ? 'border-primario bg-primario-suave text-primario'
                           : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
                       "
-                      :disabled="apagado(campo)"
+                      :disabled="bloqueado(campo)"
                       @click="alCaserioNA(campo)"
                     >
                       {{ valorTexto(campo.clave) === NA ? 'Quitar N/A' : 'N/A' }}
@@ -918,7 +950,7 @@ function caserioEnModoSelect(): boolean {
                     :id="`a-${campo.clave}`"
                     rows="3"
                     :value="valorTexto(campo.clave)"
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @input="alTexto(campo, $event)"
                   ></textarea>
@@ -944,7 +976,7 @@ function caserioEnModoSelect(): boolean {
                         ? 'Número según el código del país'
                         : ''
                     "
-                    :disabled="apagado(campo)"
+                    :disabled="bloqueado(campo)"
                     :class="claseCampo(campo.clave)"
                     @input="campo.tipo === 'telefono' || campo.tipo === 'prefijado' ? alTelefono(campo, $event) : alTexto(campo, $event)"
                   />

@@ -56,7 +56,8 @@ export function idDeGrado(nombre: string): number | null {
   return GRADOS.find((g) => g.nombre === nombre)?.id ?? null
 }
 
-const ESTADO_ACTIVO = 'activo'
+export const ESTADO_ACTIVO = 'activo'
+export const ESTADO_ARCHIVADO = 'archivado'
 const RUTA = 'usuarios/estudiantes/estudiantes'
 
 /* Nombre completo tal como se guarda en Firebase (MAYÚSCULAS, un espacio) */
@@ -114,6 +115,150 @@ export async function buscarPorNie(nie: string): Promise<CoincidenciaEstudiante 
 
 function collectionRef() {
   return collection(db, RUTA)
+}
+
+/* ── Cifras para la vista Inicio ──
+   Cuenta la matrícula que está guardada AHORA en Firebase: total, por
+   nivel y cuántos grados del catálogo tienen al menos un estudiante.
+   REGLA DEL CENTRO para separar niveles por grado:
+     menor a "Segundo"  → Primera Infancia (Parvularia 4/5/6 y Primero)
+     "Segundo" o mayor  → Educación Básica (Segundo … Noveno)
+   El nivel se decide por el GRADO REAL del documento: datos viejos o
+   importados pueden no traer "gradoId" (o traerlo en 0), así que primero
+   se lee el TEXTO del grado y se busca en el catálogo — sin importar
+   mayúsculas ni tildes — y el número guardado es solo de reserva. */
+export interface CifrasEstudiantes {
+  total: number
+  primeraInfancia: number
+  basica: number
+  gradosConMatricula: number
+}
+
+/* El id de "Segundo": todo grado con id menor es Primera Infancia */
+const ID_PRIMER_GRADO_BASICA = 2
+
+/* 'SEGUNDO', 'Séptimo', 'segundo ' → el id del catálogo. null si el
+   texto no corresponde a ningún grado conocido. */
+function idDeGradoFlexible(texto: string): number | null {
+  const limpio = texto.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  const hallado = GRADOS.find(
+    (g) => g.nombre.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '') === limpio,
+  )
+  return hallado?.id ?? null
+}
+
+/* Id de grado de un documento: primero el TEXTO del grado (campos 'grado'
+   o 'Grado que cursa', el segundo por si fue importado desde el Sheet) y
+   como reserva el número guardado. null = grado desconocido. */
+function gradoIdDeDocumento(datos: Record<string, unknown>): number | null {
+  for (const campo of ['grado', 'Grado que cursa']) {
+    const id = idDeGradoFlexible(String(datos[campo] ?? ''))
+    if (id !== null) return id
+  }
+  const numero = Number(datos['gradoId'])
+  return Number.isFinite(numero) ? numero : null
+}
+
+export async function contarEstudiantes(): Promise<CifrasEstudiantes> {
+  const snap = await getDocs(collectionRef())
+  let primeraInfancia = 0
+  let basica = 0
+  const grados = new Set<number>()
+  snap.forEach((d) => {
+    const gradoId = gradoIdDeDocumento(d.data())
+    /* Sin grado conocido cuenta como Primera Infancia ("menor a Segundo"),
+       para que total siga siendo la suma de las dos tarjetas. */
+    if (gradoId === null || gradoId < ID_PRIMER_GRADO_BASICA) primeraInfancia += 1
+    else basica += 1
+    if (gradoId !== null && GRADOS.some((g) => g.id === gradoId)) grados.add(gradoId)
+  })
+  return { total: snap.size, primeraInfancia, basica, gradosConMatricula: grados.size }
+}
+
+/* ── Nómina: lista completa de matriculados ──
+   La vista Estudiantes › Nómina lee TODOS los documentos de Firebase y los
+   agrupa por grado (en el orden del catálogo). Cada fila lleva también el
+   id numérico del grado (resuelto por el TEXTO del grado, como en las
+   cifras de Inicio) para poder agrupar y filtrar sin importar mayúsculas
+   ni tildes. */
+export interface FilaEstudiante {
+  id: string
+  nombre: string
+  nie: string
+  correo: string
+  fechaNacimiento: string
+  responsable: string
+  dui: string /* DUI del responsable */
+  telefono: string /* teléfono del responsable */
+  grado: string
+  gradoId: number | null
+  estado: string
+}
+
+function aFilaEstudiante(id: string, datos: Record<string, unknown>): FilaEstudiante {
+  return {
+    id,
+    nombre: String(datos.nombre ?? ''),
+    nie: String(datos.nie ?? ''),
+    correo: String(datos.correo ?? ''),
+    fechaNacimiento: String(datos.fechaNacimiento ?? ''),
+    responsable: String(datos.responsable ?? ''),
+    dui: String(datos.dui ?? ''),
+    telefono: String(datos.telefono ?? ''),
+    grado: String(datos.grado ?? ''),
+    gradoId: gradoIdDeDocumento(datos),
+    estado: String(datos.estado ?? '').trim() || ESTADO_ACTIVO,
+  }
+}
+
+export async function listarEstudiantes(): Promise<FilaEstudiante[]> {
+  const snap = await getDocs(collectionRef())
+  return snap.docs.map((d) => aFilaEstudiante(d.id, d.data()))
+}
+
+/* Archivar / restaurar: el documento NO se borra, solo cambia su estado
+   (igual que docentes). Eliminar SÍ lo quita de Firebase. */
+export async function cambiarEstadoEstudiante(
+  id: string,
+  estado: typeof ESTADO_ACTIVO | typeof ESTADO_ARCHIVADO,
+): Promise<void> {
+  await updateDoc(doc(db, RUTA, id), { estado })
+}
+
+export async function eliminarEstudiante(id: string): Promise<void> {
+  await deleteDoc(doc(db, RUTA, id))
+}
+
+/* ── Orden de la Nómina (regla del usuario) ──
+   Ordenar por las PARTES del nombre completo guardado ("NOMBRES APELLIDOS"):
+   nombre[2], nombre[3], nombre[4] si hay, y al final nombre[0] y nombre[1].
+   Primero los APELLIDOS (parte 2, 3 y la que siga, p. ej. apellido de
+   casada) y por último los nombres:
+   "MARIA ELENA RAMOS LOPEZ" → RAMOS, LOPEZ, MARIA, ELENA. */
+export function claveOrdenNomina(nombre: string): string[] {
+  const partes = nombre.trim().split(/\s+/)
+  const p = (i: number): string => partes[i] ?? ''
+  return [p(2), p(3), p(4), p(0), p(1)]
+}
+
+/* Comparador de la Nómina por esa clave (español: tildes y ñ en su lugar) */
+export function compararNomina(a: FilaEstudiante, b: FilaEstudiante): number {
+  const ca = claveOrdenNomina(a.nombre)
+  const cb = claveOrdenNomina(b.nombre)
+  for (let i = 0; i < Math.max(ca.length, cb.length); i += 1) {
+    const r = (ca[i] ?? '').localeCompare(cb[i] ?? '', 'es')
+    if (r !== 0) return r
+  }
+  return 0
+}
+
+/* 'SEGUNDO', 'séptimo ', 'OCTAVO' → el nombre EXACTO del catálogo (mismo
+   criterio flexible que las cifras de Inicio). null si el texto no
+   corresponde a ningún grado conocido. */
+export function nombreCanonicoDeGrado(texto: string): string | null {
+  const id = idDeGradoFlexible(String(texto ?? ''))
+  if (id === null) return null
+  return GRADOS.find((g) => g.id === id)?.nombre ?? null
 }
 
 /* Mensaje legible cuando un duplicado bloquea el paso */
@@ -174,18 +319,6 @@ export async function crearEstudiante(datos: DatosFirebaseEstudiante): Promise<s
   })
   return id
 }
-
-/* Mensaje legible para las notificaciones (mismo criterio que docentes) */
-export function mensajeError(e: unknown): string {
-  const codigo = (e as { code?: string })?.code ?? ''
-  if (codigo === 'permission-denied') {
-    return 'Sin permisos para escribir en Firebase. Publica las reglas de Firestore en Firebase Console → Firestore Database → Reglas.'
-  }
-  if (codigo === 'unavailable') return 'Firebase no está disponible en este momento.'
-  const texto = (e as Error)?.message
-  return texto ? String(texto) : 'Ocurrió un error inesperado.'
-}
-
 
 /* ── Estudiantes › Actualizar: guarda los cambios de un estudiante ya
    matriculado. Se lo busca por su nombre ANTERIOR (el que la fila del
@@ -265,4 +398,15 @@ function aCoincidencia(datos: Record<string, unknown>): CoincidenciaEstudiante {
     nie: String(datos.nie ?? ''),
     grado: String(datos.grado ?? ''),
   }
+}
+
+/* Mensaje legible para las notificaciones (mismo criterio que docentes) */
+export function mensajeError(e: unknown): string {
+  const codigo = (e as { code?: string })?.code ?? ''
+  if (codigo === 'permission-denied') {
+    return 'Sin permisos para escribir en Firebase. Publica las reglas de Firestore en Firebase Console → Firestore Database → Reglas.'
+  }
+  if (codigo === 'unavailable') return 'Firebase no está disponible en este momento.'
+  const texto = (e as Error)?.message
+  return texto ? String(texto) : 'Ocurrió un error inesperado.'
 }

@@ -11,8 +11,9 @@ import LoginView from '@/views/LoginView.vue'
 import InicioView from '@/views/InicioView.vue'
 import DocentesView from '@/views/DocentesView.vue'
 import MatricularView from '@/views/MatricularView.vue'
-import InformacionCeView from '@/views/InformacionCeView.vue'
 import ActualizarView from '@/views/ActualizarView.vue'
+import NominaView from '@/views/NominaView.vue'
+import InformacionCeView from '@/views/InformacionCeView.vue'
 
 /* Nivel proyecto: notificaciones push y capa de carga global */
 import PanelNotificaciones from '@/components/ui/PanelNotificaciones.vue'
@@ -192,6 +193,9 @@ function cerrarSiMovil() {
         />
         <ActualizarView
           v-else-if="seccionActiva === 'estudiantes' && subseccionActiva === 'actualizar'"
+        />
+        <NominaView
+          v-else-if="seccionActiva === 'estudiantes' && subseccionActiva === 'nomina'"
         />
         <InformacionCeView
           v-else-if="seccionActiva === 'configuracion' && subseccionActiva === 'informacion-ce'"

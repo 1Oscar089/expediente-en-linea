@@ -26,8 +26,6 @@ export const HOJA_PRIMERA_INFANCIA = 'primera infancia'
 export const HOJA_BASICA = 'basica'
 export type HojaEstudiante = typeof HOJA_PRIMERA_INFANCIA | typeof HOJA_BASICA
 
-console.log('URL del Sheet =', import.meta.env.VITE_SHEET_ESTUDIANTES_URL)
-
 interface RespuestaSheet {
   ok?: boolean
   error?: string
@@ -379,7 +377,9 @@ export interface CoincidenciaFila {
 }
 
 /* Busca estudiantes por letras del nombre (la app solo busca desde 3
-   letras; el Apps Script lo repite por seguridad). */
+   letras; el Apps Script lo repite por seguridad). SIEMPRE busca dentro
+   de la hoja del nivel pedido: la respuesta se re-filtra por si acaso,
+   así un nivel jamás muestra estudiantes del otro. */
 export async function buscarEstudiantes(
   hoja: HojaEstudiante,
   letras: string,
@@ -389,13 +389,14 @@ export async function buscarEstudiantes(
     hoja,
     letras: letras.trim(),
   })
-  return (respuesta.coincidencias ?? []).map((c) => ({
+  const encontradas: CoincidenciaFila[] = (respuesta.coincidencias ?? []).map((c) => ({
     hoja: c.hoja === HOJA_BASICA ? HOJA_BASICA : HOJA_PRIMERA_INFANCIA,
     fila: Number(c.fila),
     nombre: String(c.nombre ?? ''),
     nie: String(c.nie ?? ''),
     grado: String(c.grado ?? ''),
   }))
+  return encontradas.filter((c) => c.hoja === hoja)
 }
 
 /* Lee UNA fila existente como {título de columna: valor}, usando los
@@ -436,4 +437,22 @@ export async function actualizarEstudiante(
     fila,
     cambios: pares,
   })
+}
+
+/* ── Nómina: archivar / restaurar / borrar la fila del estudiante ──
+   El Apps Script (VERSIÓN 3) busca la fila por NOMBRE COMPLETO en las dos
+   hojas (la matrícula inteligente garantiza que el nombre no se repite) y
+   escribe su columna "Estado" —la crea al final si falta— o borra la fila.
+   Si la fila no está (p. ej. la matrícula se guardó SOLO en Firebase),
+   responde ok sin tocar nada, para que la app siga con normalidad. */
+export async function archivarFilaEstudiante(nombre: string, nie: string): Promise<void> {
+  await llamarSheet({ accion: 'archivar', claveNombre: nombre, nie: nie.trim() })
+}
+
+export async function restaurarFilaEstudiante(nombre: string, nie: string): Promise<void> {
+  await llamarSheet({ accion: 'restaurar', claveNombre: nombre, nie: nie.trim() })
+}
+
+export async function borrarFilaEstudiante(nombre: string, nie: string): Promise<void> {
+  await llamarSheet({ accion: 'borrar', claveNombre: nombre, nie: nie.trim() })
 }

@@ -359,3 +359,79 @@ export async function guardarEstudiante(
     nie: nie.trim(),
   })
 }
+
+/* ── Estudiantes › ACTUALIZAR: buscar, leer y actualizar filas existentes ──
+
+   El flujo de Actualizar NO agrega filas: primero BUSCA (por letras del
+   nombre), luego LEE la fila completa y por último ACTUALIZA solo las
+   columnas que cambiaron. El Apps Script repite las revisiones (duplicados
+   excluyendo la propia fila) antes de escribir. */
+
+/* Una coincidencia de búsqueda: qué fila de qué hoja coincide */
+export interface CoincidenciaFila {
+  hoja: HojaEstudiante
+  fila: number
+  nombre: string
+  nie: string
+  grado: string
+}
+
+/* Busca estudiantes por letras del nombre (la app solo busca desde 3
+   letras; el Apps Script lo repite por seguridad). */
+export async function buscarEstudiantes(
+  hoja: HojaEstudiante,
+  letras: string,
+): Promise<CoincidenciaFila[]> {
+  const respuesta = await llamarSheet<{ ok?: boolean; coincidencias?: CoincidenciaFila[] }>({
+    accion: 'buscar',
+    hoja,
+    letras: letras.trim(),
+  })
+  return (respuesta.coincidencias ?? []).map((c) => ({
+    hoja: c.hoja === HOJA_BASICA ? HOJA_BASICA : HOJA_PRIMERA_INFANCIA,
+    fila: Number(c.fila),
+    nombre: String(c.nombre ?? ''),
+    nie: String(c.nie ?? ''),
+    grado: String(c.grado ?? ''),
+  }))
+}
+
+/* Lee UNA fila existente como {título de columna: valor}, usando los
+   encabezados canónicos de la app (las columnas que falten en la hoja no
+   aparecen y la app las trata como ''). */
+export async function leerEstudiante(
+  hoja: HojaEstudiante,
+  fila: number,
+): Promise<Record<string, string>> {
+  const respuesta = await llamarSheet<{ ok?: boolean; datos?: Record<string, unknown> }>({
+    accion: 'leer',
+    hoja,
+    fila,
+    encabezados: encabezadosDe(hoja),
+  })
+  const datos: Record<string, string> = {}
+  for (const [titulo, valor] of Object.entries(respuesta.datos ?? {})) {
+    datos[titulo] = String(valor ?? '')
+  }
+  return datos
+}
+
+/* Actualiza SOLO las columnas cambiadas de una fila existente (no toca
+   'Fecha de registro' ni columnas que no vengan). */
+export async function actualizarEstudiante(
+  hoja: HojaEstudiante,
+  fila: number,
+  cambios: Record<string, string>,
+): Promise<void> {
+  const pares = Object.entries(cambios).map(([titulo, valor]) => ({
+    titulo,
+    valor: String(valor ?? ''),
+  }))
+  if (pares.length === 0) return
+  await llamarSheet({
+    accion: 'actualizar',
+    hoja,
+    fila,
+    cambios: pares,
+  })
+}

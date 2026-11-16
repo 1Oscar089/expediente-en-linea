@@ -1,4 +1,4 @@
-import { collection, doc, getDoc, getDocs, limit, query, setDoc, where } from 'firebase/firestore'
+import { collection, deleteDoc, doc, getDoc, getDocs, limit, query, setDoc, updateDoc, where } from 'firebase/firestore'
 
 import { db } from '@/lib/firebase'
 
@@ -184,4 +184,85 @@ export function mensajeError(e: unknown): string {
   if (codigo === 'unavailable') return 'Firebase no está disponible en este momento.'
   const texto = (e as Error)?.message
   return texto ? String(texto) : 'Ocurrió un error inesperado.'
+}
+
+
+/* ── Estudiantes › Actualizar: guarda los cambios de un estudiante ya
+   matriculado. Se lo busca por su nombre ANTERIOR (el que la fila del
+   Sheet tenía al leerse); si cambió el nombre o el grado, el id del
+   documento cambia con ellos: se crea el documento nuevo y se borra el
+   viejo (regla del usuario: el id no importa, los datos sí).
+   El correo se recalcula igual que en la matrícula: el NUEVO INGRESO que
+   aún no tiene NIE queda con el correo EN BLANCO. ── */
+export async function actualizarEstudiante(
+  nombreAnterior: string,
+  datos: DatosFirebaseEstudiante,
+): Promise<void> {
+  const nombre = nombreCompleto(datos.nombres, datos.apellidos)
+  if (!nombre) throw new Error('Faltan los nombres y apellidos del estudiante.')
+
+  /* Documento actual, por el nombre anterior (único en el sistema) */
+  const snap = await getDocs(
+    query(collectionRef(), where('nombre', '==', nombreAnterior), limit(1)),
+  )
+  const viejo = snap.docs[0]
+
+  /* El nombre nuevo no puede pertenecer a OTRA persona */
+  if (nombre !== nombreAnterior) {
+    const porNombre = await getDocs(
+      query(collectionRef(), where('nombre', '==', nombre), limit(1)),
+    )
+    if (porNombre.docs[0]) {
+      throw new Error(mensajeDuplicado(aCoincidencia(porNombre.docs[0].data()), false))
+    }
+  }
+
+  /* El NIE tampoco (un mismo documento puede cambiar su propio NIE) */
+  if (datos.nie.trim()) {
+    const porNie = await getDocs(
+      query(collectionRef(), where('nie', '==', datos.nie.trim()), limit(1)),
+    )
+    const dueno = porNie.docs[0]
+    if (dueno && (!viejo || dueno.id !== viejo.id)) {
+      throw new Error(mensajeDuplicado(aCoincidencia(dueno.data()), true))
+    }
+  }
+
+  const correo = datos.nuevoIngreso ? '' : `${datos.nie}@clases.edu.sv`.trim().toLowerCase()
+  const registro = {
+    nombre,
+    correo,
+    nie: datos.nie.trim(),
+    fechaNacimiento: datos.fechaNacimiento,
+    responsable: datos.responsable,
+    dui: datos.documento,
+    telefono: datos.telefono,
+    grado: datos.grado,
+    estado: ESTADO_ACTIVO,
+  }
+  const idNuevo = idDocumento(datos.gradoId, datos.nombres, datos.apellidos)
+
+  /* Nombre y grado intactos: solo se actualiza el documento existente */
+  if (viejo && viejo.id === idNuevo) {
+    await updateDoc(doc(db, RUTA, viejo.id), registro)
+    return
+  }
+  /* El id cambia (nuevo nombre o nuevo grado) o no estaba en Firebase:
+     el destino no puede estar ocupado por otra persona */
+  if (await existeId(idNuevo)) {
+    throw new Error(
+      `${nombre} ya está matriculado(a) en el grado ${datos.grado}. No se puede mover a ese lugar.`,
+    )
+  }
+  await setDoc(doc(db, RUTA, idNuevo), registro)
+  if (viejo) await deleteDoc(doc(db, RUTA, viejo.id))
+}
+
+/* Datos legibles de un documento para los mensajes de duplicado */
+function aCoincidencia(datos: Record<string, unknown>): CoincidenciaEstudiante {
+  return {
+    nombre: String(datos.nombre ?? ''),
+    nie: String(datos.nie ?? ''),
+    grado: String(datos.grado ?? ''),
+  }
 }

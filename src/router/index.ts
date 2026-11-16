@@ -12,6 +12,7 @@ import type { Rol } from '@/lib/usuarios'
 import DocentesView from '@/views/DocentesView.vue'
 import InicioView from '@/views/InicioView.vue'
 import InformacionCeView from '@/views/InformacionCeView.vue'
+import ActualizarView from '@/views/ActualizarView.vue'
 
 /* Grupos de permisos (misma fuente de verdad que config/menu.ts) */
 const DIRECCION: Rol[] = ['admin', 'director']
@@ -98,9 +99,9 @@ const router = createRouter({
 
     // Estudiantes: la sección sola redirige a su primera acción
     { path: '/estudiantes', redirect: '/estudiantes/matricular' },
-    {
+        {
       path: '/estudiantes/actualizar',
-      component: () => import('@/views/SeccionView.vue'),
+      component: ActualizarView,
       meta: { titulo: 'Actualizar', roles: ACADEMICO },
     },
     {

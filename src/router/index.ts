@@ -9,6 +9,9 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import { useAuthStore } from '@/stores/auth'
 import type { Rol } from '@/lib/usuarios'
+import DocentesView from '@/views/DocentesView.vue'
+import InicioView from '@/views/InicioView.vue'
+import InformacionCeView from '@/views/InformacionCeView.vue'
 
 /* Grupos de permisos (misma fuente de verdad que config/menu.ts) */
 const DIRECCION: Rol[] = ['admin', 'director']
@@ -19,7 +22,7 @@ const router = createRouter({
   routes: [
     { path: '/', redirect: '/inicio' },
 
-    { path: '/inicio', name: 'inicio', component: () => import('@/views/InicioView.vue') },
+    { path: '/inicio', name: 'inicio', component: InicioView },
 
     // Configuración: la sección sola redirige a su primera subsección.
     // Cada subsección vive en SU hoja del libro "configuracion"; las que aún
@@ -62,7 +65,7 @@ const router = createRouter({
     },
     {
       path: '/configuracion/informacion-ce',
-      component: () => import('@/views/InformacionCeView.vue'),
+      component: InformacionCeView,
       meta: { titulo: 'Informacion CE', roles: DIRECCION },
     },
     {
@@ -89,7 +92,7 @@ const router = createRouter({
     {
       path: '/docentes',
       name: 'docentes',
-      component: () => import('@/views/DocentesView.vue'),
+      component: DocentesView,
       meta: { roles: DIRECCION }, // la sección Docentes es de dirección
     },
 

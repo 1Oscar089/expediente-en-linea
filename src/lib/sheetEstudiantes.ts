@@ -1,29 +1,54 @@
 /* ── Cliente del Sheet de ESTUDIANTES (Apps Script) ──
-   Libro "estudiantes" con UNA hoja llamada "estudiantes": una FILA por
-   cada matrícula guardada, con TODOS los datos del formulario.
+   Libro "estudiantes" con UNA HOJA POR NIVEL:
+     - "primera infancia" → matrículas de Primera Infancia
+     - "basica"           → matrículas de Educación Básica
+   Una FILA por cada matrícula guardada, con TODOS los datos del formulario.
    La URL se configura en VITE_SHEET_ESTUDIANTES_URL y el despliegue es
    igual que los otros módulos (Apps Script → Aplicación web → Yo +
    Cualquiera → URL /exec). El POST se envía como text/plain (sin header
    Content-Type) para evitar el preflight de CORS.
-   La primera vez que se guarda, el Apps Script crea la hoja y escribe los
-   ENCABEZADOS que este módulo declara: la fuente de verdad de las columnas
-   vive SOLO aquí. */
+   La primera vez que se guarda un nivel, el Apps Script crea SU hoja y
+   escribe los ENCABEZADOS que este módulo declara; el Apps Script coloca
+   cada dato bajo SU encabezado aunque la hoja ya exista (con otras o en
+   otro orden), y las columnas que falten se agregan solas al final.
+   La fuente de verdad de las columnas vive SOLO aquí.
+   A PRUEBA DE ERRORES: antes de escribir, el Apps Script revisa que el
+   nombre completo y el NIE no pertenezcan ya a otro estudiante (revisa
+   AMBAS hojas) y usa LockService para que dos guardados simultáneos no
+   pisen la misma fila. */
 
 const URL_SHEET = (import.meta.env.VITE_SHEET_ESTUDIANTES_URL ?? '').trim()
 
 export const sheetEstudiantesConfigurado = URL_SHEET.length > 0
+
+/* Nombres EXACTOS de las hojas del libro (los mismos en el Apps Script) */
+export const HOJA_PRIMERA_INFANCIA = 'primera infancia'
+export const HOJA_BASICA = 'basica'
+export type HojaEstudiante = typeof HOJA_PRIMERA_INFANCIA | typeof HOJA_BASICA
 
 interface RespuestaSheet {
   ok?: boolean
   error?: string
 }
 
-async function llamarSheet(cuerpo: Record<string, unknown>): Promise<void> {
+/* Respuesta de la revisión de duplicados (accion 'verificar') */
+export interface RevisionDuplicados {
+  ok?: boolean
+  error?: string
+  /* Nombre completo ya matriculado */
+  nombreMatriculado?: boolean
+  coincidencia?: { hoja: string; fila: number; nombre: string; nie: string; grado: string }
+  /* NIE ya existente */
+  nieRegistrado?: boolean
+  duenoNie?: { hoja: string; fila: number; nombre: string; nie: string; grado: string }
+}
+
+async function llamarSheet<T extends RespuestaSheet>(cuerpo: Record<string, unknown>): Promise<T> {
   if (!sheetEstudiantesConfigurado) {
     throw new Error('el Sheet de estudiantes no está configurado (falta VITE_SHEET_ESTUDIANTES_URL).')
   }
   const control = new AbortController()
-  const temporizador = setTimeout(() => control.abort(), 25000)
+  const temporizador = setTimeout(() => control.abort(), 30000)
   try {
     const respuesta = await fetch(URL_SHEET, {
       method: 'POST',
@@ -34,15 +59,16 @@ async function llamarSheet(cuerpo: Record<string, unknown>): Promise<void> {
       throw new Error(`el Sheet respondió con error HTTP ${respuesta.status}`)
     }
     const texto = await respuesta.text()
-    let datos: RespuestaSheet
+    let datos: T
     try {
-      datos = JSON.parse(texto) as RespuestaSheet
+      datos = JSON.parse(texto) as T
     } catch {
       throw new Error(
         'la URL del Sheet no responde como Web App. Revisa el despliegue: "Ejecutar como: Yo" y "Quién tiene acceso: Cualquiera", y usa la URL que termina en /exec.',
       )
     }
     if (!datos.ok) throw new Error(datos.error || 'el Sheet devolvió un error.')
+    return datos
   } catch (e) {
     if ((e as Error)?.name === 'AbortError') {
       throw new Error('el Sheet tardó demasiado en responder.')
@@ -58,11 +84,12 @@ async function llamarSheet(cuerpo: Record<string, unknown>): Promise<void> {
   }
 }
 
-/* ── Columnas del libro (UNA fila por estudiante, en orden) ── */
-export const ENCABEZADOS_ESTUDIANTES: string[] = [
+/* ── Columnas de PRIMERA INFANCIA (UNA fila por estudiante, en orden) ── */
+export const ENCABEZADOS_PRIMERA_INFANCIA: string[] = [
   /* Registro */
   'Fecha de registro',
   /* Parte 2.1 · estudiante */
+  '¿Es nuevo ingreso al sistema de El Salvador?',
   'NIE',
   'Nombres',
   'Apellidos',
@@ -223,19 +250,112 @@ export const ENCABEZADOS_ESTUDIANTES: string[] = [
   '9. Nombre del o la docente responsable',
 ]
 
-/* Convierte un registro {columna: valor} a la fila del libro, EN EL ORDEN
-   de los encabezados (las columnas sin valor quedan en blanco). */
-export function aFila(datos: Record<string, string>): string[] {
-  return ENCABEZADOS_ESTUDIANTES.map((columna) => datos[columna] ?? '')
+/* ── Columnas de EDUCACIÓN BÁSICA ── */
+export const ENCABEZADOS_BASICA: string[] = [
+  /* Registro */
+  'Fecha de registro',
+  /* Parte 2 · estudiante */
+  '¿Es nuevo ingreso al sistema de El Salvador?',
+  'NIE',
+  'Nombres',
+  'Apellidos',
+  'Fecha de nacimiento (estudiante)',
+  'Sexo',
+  'Nacionalidad (estudiante)',
+  '¿Es naturalizado? (estudiante)',
+  'Estado familiar (estudiante)',
+  'Etnia',
+  'Tiene alguna discapacidad (estudiante)',
+  'Discapacidad especifique (estudiante)',
+  'Embarazo (estudiante)',
+  'Fecha de parto (estudiante)',
+  'Departamento (estudiante)',
+  'Distrito (estudiante)',
+  'Cantón (estudiante)',
+  'Caserío (estudiante)',
+  'Caserío especifique (estudiante)',
+  'Grado que cursa',
+  'Grado (id)',
+  'Tipo de calle',
+  'Medio de transporte',
+  'Transporte especifique',
+  'Factores de riesgo en camino',
+  'Trabaja el estudiante',
+  'Dependencia económica del estudiante',
+  'Dependencia especifique',
+  'Ocupación del estudiante',
+  'Ocupación especifique (estudiante)',
+  'Tipo de sangre',
+  'Propiedad de la vivienda',
+  'Vivienda especifique',
+  'Servicios básicos',
+  'Acceso a internet',
+  'Recibe remesas',
+  'El estudiante tiene hijos',
+  'Personas del grupo familiar que han emigrado',
+  /* Parte 3 · responsable */
+  'Identificación (responsable)',
+  '¿Es familiar? (responsable)',
+  'Nombre completo (responsable)',
+  'Fecha de nacimiento (responsable)',
+  'Nacionalidad (responsable)',
+  '¿Es naturalizado? (responsable)',
+  'Departamento de nacimiento (responsable)',
+  'Distrito de nacimiento (responsable)',
+  'Sexo (responsable)',
+  'Estado familiar (responsable)',
+  'Tiene alguna discapacidad (responsable)',
+  'Embarazo (responsable)',
+  'Fecha de parto (responsable)',
+  'Código de teléfono (responsable)',
+  'Teléfono (responsable)',
+  'Profesión (responsable)',
+  'Profesión especifique (responsable)',
+  'Escolaridad (responsable)',
+  'Ocupación (responsable)',
+  'Ocupación especifique (responsable)',
+]
+
+function encabezadosDe(hoja: HojaEstudiante): string[] {
+  return hoja === HOJA_BASICA ? ENCABEZADOS_BASICA : ENCABEZADOS_PRIMERA_INFANCIA
 }
 
-/* Guarda UNA matrícula: el Apps Script crea la hoja "estudiantes" (con los
-   encabezados) la primera vez y agrega la fila al final. */
-export async function guardarEstudiante(datos: Record<string, string>): Promise<void> {
+/* Convierte un registro {columna: valor} a la fila del libro, EN EL ORDEN
+   de los encabezados (las columnas sin valor quedan en blanco). */
+function aFila(hoja: HojaEstudiante, datos: Record<string, string>): string[] {
+  return encabezadosDe(hoja).map((columna) => datos[columna] ?? '')
+}
+
+/* ── Revisión de duplicados: el Apps Script busca el nombre completo y el
+   NIE en LAS DOS hojas y dice a quién pertenecen ── */
+export async function verificarDuplicados(
+  claveNombre: string,
+  nie: string,
+): Promise<RevisionDuplicados> {
+  return llamarSheet<RevisionDuplicados>({
+    accion: 'verificar',
+    claveNombre,
+    nie: nie.trim(),
+  })
+}
+
+/* Guarda UNA matrícula: el Apps Script crea la hoja del nivel (con los
+   encabezados) la primera vez, revisa duplicados (por nombre completo y
+   NIE en ambas hojas) y agrega la fila al final. Si la misma matrícula ya
+   estaba en el Sheet (p. ej. un intento anterior guardó el Sheet pero
+   falló Firebase), NO la duplica: sigue sin error. */
+export async function guardarEstudiante(
+  hoja: HojaEstudiante,
+  datos: Record<string, string>,
+  claveNombre: string,
+  nie: string,
+): Promise<void> {
   await llamarSheet({
     accion: 'guardar',
-    hoja: 'estudiantes',
-    encabezados: ENCABEZADOS_ESTUDIANTES,
-    fila: aFila(datos),
+    hoja,
+    encabezados: encabezadosDe(hoja),
+    fila: aFila(hoja, datos),
+    claveNombre,
+    nie: nie.trim(),
   })
 }

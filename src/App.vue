@@ -14,7 +14,7 @@ import MatricularView from '@/views/MatricularView.vue'
 import InformacionCeView from '@/views/InformacionCeView.vue'
 
 /* Nivel proyecto: notificaciones push y capa de carga global */
-import Notificaciones from '@/components/ui/Notificaciones.vue'
+import PanelNotificaciones from '@/components/ui/PanelNotificaciones.vue'
 import CargaGlobal from '@/components/ui/CargaGlobal.vue'
 
 const auth = useAuthStore()
@@ -197,6 +197,6 @@ function cerrarSiMovil() {
   </div>
 
   <!-- Nivel proyecto: notificaciones (5 s, esquina superior derecha) y carga que bloquea todo -->
-  <Notificaciones />
+  <PanelNotificaciones />
   <CargaGlobal />
 </template>

@@ -21,8 +21,21 @@ import {
   cantonesDe,
   distritosDe,
 } from '@/lib/geoSV'
-import { guardarEstudiante } from '@/lib/sheetEstudiantes'
-import { GRADOS, crearEstudiante, idDeGrado, mensajeError } from '@/lib/estudiantes'
+import {
+  HOJA_BASICA,
+  HOJA_PRIMERA_INFANCIA,
+  guardarEstudiante,
+} from '@/lib/sheetEstudiantes'
+import {
+  GRADOS,
+  buscarPorNie,
+  buscarPorNombre,
+  crearEstudiante,
+  idDeGrado,
+  mensajeDuplicado,
+  mensajeError,
+  nombreCompleto,
+} from '@/lib/estudiantes'
 import {
   INFO_CE_VACIA,
   infoCEGuardada,
@@ -31,7 +44,8 @@ import {
   type InfoCE,
 } from '@/lib/sheetConfiguracion'
 
-/* ── Matricular: elección de modalidad + flujo de PRIMERA INFANCIA ──
+/* ── Matricular: elección de modalidad + flujo de PRIMERA INFANCIA y de
+   EDUCACIÓN BÁSICA ──
    Al entrar a la sección se abre un modal para elegir si la matrícula es de
    PRIMERA INFANCIA o de EDUCACIÓN BÁSICA; con la modalidad elegida, la
    sección muestra el panel que le corresponde.
@@ -46,7 +60,11 @@ import {
    completarlos; los opcionales (o) no bloquean. Partes:
    - Parte 1  · Datos generales del centro educativo (NO editables: se leen
                 del Sheet de configuración, hoja "informacion-ce").
-   - Parte 2.1· Datos del estudiante (incluye el GRADO que cursará).
+   - Parte 2.1· Datos del estudiante. PRIMERA PREGUNTA: ¿es NUEVO INGRESO
+                al sistema de El Salvador? Si es Sí, el NIE NO es
+                obligatorio y el correo se deja EN BLANCO (se llenará
+                después, al editar en Estudiantes › Actualizar). Incluye el
+                GRADO que cursará.
    - Parte 2.2· Datos de la madre (pregunta inicial Sí/No; si es No, todos
                 los campos quedan desactivados y en blanco).
    - Parte 2.3· Datos del padre (igual que la madre).
@@ -60,10 +78,31 @@ import {
    - Parte 7  · Hábitos del estudiante (sueño y alimentación).
    - Parte 8  · Participación y compromisos.
    - Parte 9  · Modalidad de atención; aquí el botón final es GUARDAR:
-                todos los datos van al Sheet "estudiantes" (una fila por
-                estudiante) y a Firebase van SOLO los datos importantes
+                todos los datos van al Sheet "estudiantes" (hoja "primera
+                infancia") y a Firebase van SOLO los datos importantes
                 (nombre, NIE, correo, nacimiento, responsable, documento,
                 teléfono y grado).
+
+   EDUCACIÓN BÁSICA también va por partes (3):
+   - Parte 1  · Datos del centro escolar (igual que primera infancia).
+   - Parte 2  · Datos del estudiante (¿nuevo ingreso?, nombres, apellidos,
+                nacimiento, nacionalidad/naturalizado, sexo, estado
+                familiar, etnia N/A, discapacidad, embarazo, dirección,
+                tipo de calle, transporte, factores de riesgo, trabajo,
+                dependencia económica, ocupación, tipo de sangre,
+                propiedad de la vivienda, servicios básicos, internet,
+                remesas, hijos y familiares emigrados).
+   - Parte 3  · Datos del responsable; aquí el botón final es GUARDAR
+                (Sheet "estudiantes", hoja "basica" + Firebase).
+
+   MATRÍCULA INTELIGENTE (los dos niveles): al salir de la parte del
+   estudiante se revisa en Firebase que el NOMBRE COMPLETO no esté ya
+   matriculado y que el NIE no pertenezca a otra persona; el Apps Script
+   vuelve a revisarlo en el Sheet antes de escribir (revisa ambas hojas) y
+   dice a quién pertenece lo encontrado.
+
+   ID DEL DOCUMENTO EN FIREBASE: id de clase (número del grado) + nombre
+   completo (nombres + apellidos) EN MINÚSCULAS y SIN ESPACIOS.
 
    El botón CANCELAR vive en la barra de nivel (junto a "Cambiar").
 
@@ -197,6 +236,7 @@ const ANIO_ACTUAL = new Date().getFullYear()
 const hoyISO = aIsoFecha(new Date())
 
 interface DatosEstudiante {
+  nuevoIngreso: string /* 'Sí' | 'No' | '' — PRIMERA pregunta de la parte */
   nie: string
   nombres: string
   apellidos: string
@@ -221,6 +261,7 @@ interface DatosEstudiante {
 /* Estado limpio de la parte 2.1: se usa para el borrador, para cancelar
    y para saber si el usuario ya escribió algo. */
 const FORM_VACIO: DatosEstudiante = {
+  nuevoIngreso: '',
   nie: '',
   nombres: '',
   apellidos: '',
@@ -633,6 +674,828 @@ const modalidadAtencion = reactive({
   docente: docenteSugerido,
 })
 
+/* ═════════════════ EDUCACIÓN BÁSICA: asistente de 3 partes ═════════════════
+
+   Parte 1 · Datos del centro escolar (los mismos que primera infancia,
+             leídos del Sheet de configuración y NO editables).
+   Parte 2 · Datos del estudiante (¿nuevo ingreso? primero: si es Sí, el
+             NIE no es obligatorio y el correo queda en blanco).
+   Parte 3 · Datos del responsable; aquí el botón final es GUARDAR: los
+             datos van al Sheet "estudiantes" (hoja "basica") y a Firebase
+             van SOLO los datos importantes (nombre, NIE, correo,
+             nacimiento, responsable, documento, teléfono y grado). */
+
+const PASOS_BASICA = [
+  { id: 'basica-centro', etiqueta: 'Parte 1', titulo: 'Datos del centro escolar' },
+  { id: 'basica-estudiante', etiqueta: 'Parte 2', titulo: 'Datos del estudiante' },
+  { id: 'basica-responsable', etiqueta: 'Parte 3', titulo: 'Datos del responsable' },
+] as const
+
+const pasoBasica = ref(0)
+const pasoBasicaActual = computed(() => PASOS_BASICA[pasoBasica.value] ?? PASOS_BASICA[0])
+const esUltimoPasoBasica = computed(() => pasoBasica.value === PASOS_BASICA.length - 1)
+
+/* ── Parte 2: datos del estudiante de Básica ── */
+const SEXO_BASICA = ['Masculino', 'Femenino']
+const ESTADOS_FAMILIARES = [
+  'Soltero(a)',
+  'Casado(a)',
+  'Unión libre (acompañado(a))',
+  'Divorciado(a)',
+  'Viudo(a)',
+]
+const OPCIONES_ESTADO_FAMILIAR = opcionesConReglas(ESTADOS_FAMILIARES)
+const TIPOS_CALLE = ['Pavimentada', 'Adoquinada', 'Empedrada', 'Tierra balastre', 'Mixta']
+const OPCIONES_TIPO_CALLE = opcionesConReglas(TIPOS_CALLE)
+const MEDIOS_TRANSPORTE = [
+  'A pie',
+  'Automóvil',
+  'Bicicleta',
+  'Bus',
+  'Moto taxi (tuktuk)',
+  'Motocicleta',
+  'Pick-up',
+  'Taxi',
+]
+const OTRO_TRANSPORTE = OTRO_OCUPACION
+const OPCIONES_TRANSPORTE = opcionesConReglas(MEDIOS_TRANSPORTE)
+/* El usuario pidió "agua, luz eléctrica, Internet, y agrega algunos más" */
+const SERVICIOS_BASICOS_LISTA = [
+  'Agua',
+  'Luz eléctrica',
+  'Internet',
+  'Drenaje de aguas negras',
+  'Alcantarillado sanitario',
+  'Recolección de basura',
+  'Energía solar',
+  'Televisión por cable',
+  'Teléfono fijo',
+]
+const TIPOS_SANGRE = ['A+', 'A-', 'AB+', 'AB-', 'B+', 'B-', 'O+', 'O-']
+const OPCIONES_SANGRE = opcionesConReglas(TIPOS_SANGRE)
+const PROPIEDADES_VIVIENDA = ['Propia', 'Alquilada', 'Prestada', 'Otra (especifique)']
+const OTRA_PROPIEDAD = 'Otra (especifique)'
+const OPCIONES_PROPIEDAD = opcionesConReglas(PROPIEDADES_VIVIENDA)
+const DEPENDENCIAS_ECONOMICAS = ['Padre', 'Madre', 'Padre y Madre', 'Otros (especifique)']
+const OTROS_DEPENDENCIA = 'Otros (especifique)'
+const OPCIONES_DEPENDENCIA = opcionesConReglas(DEPENDENCIAS_ECONOMICAS)
+/* Ocupaciones de la ESTUDIANTE: "algunas ocupaciones, N/A, otros (especifique)" */
+const OPCIONES_OCUPACION_ESTUDIANTE: string[] = [
+  NA,
+  ...[...OCUPACIONES].sort((a, b) => a.localeCompare(b, 'es')),
+  OTRO_OCUPACION,
+]
+/* Profesiones del responsable: "coloca algunas y si no otra (especifique)" */
+const PROFESIONES = [
+  'Abogado(a)',
+  'Arquitecto(a)',
+  'Contador(a)',
+  'Doctor(a)',
+  'Enfermero(a)',
+  'Ingeniero(a)',
+  'Maestro(a)',
+  'Mecánico(a)',
+  'Piloto(a)',
+  'Técnico(a)',
+]
+const OPCIONES_PROFESION: string[] = [
+  ...[...PROFESIONES].sort((a, b) => a.localeCompare(b, 'es')),
+  OTRO_OCUPACION,
+]
+/* Escolaridad del responsable (orden natural de niveles, NO alfabético) */
+const ESCOLARIDADES = ['Parvularia', 'Básica', 'Media', 'Universitaria']
+/* Nacionalidades de Centroamérica (orden alfabético) */
+const NACIONALIDADES_CA = [
+  'Beliceña',
+  'Costarricense',
+  'Guatemalteca',
+  'Hondureña',
+  'Nicaragüense',
+  'Panameña',
+  'Salvadoreña',
+].sort((a, b) => a.localeCompare(b, 'es'))
+/* Grados que se pueden cursar en Básica: de SEGUNDO a NOVENO (regla del proyecto) */
+const GRADOS_BASICA = GRADOS.filter((g) => g.id >= 2)
+
+interface DatosEstudianteBasica {
+  nuevoIngreso: string /* 'Sí' | 'No' | '' — PRIMERA pregunta */
+  nie: string
+  nombres: string
+  apellidos: string
+  fechaNacimiento: string /* yyyy-mm-dd */
+  sexo: string /* 'Masculino' | 'Femenino' | '' */
+  nacionalidad: string
+  naturalizado: string /* 'Sí' | 'No' | '' */
+  estadoFamiliar: string
+  discapacidad: string /* 'Sí' | 'No' | '' */
+  discapacidadCual: string
+  embarazo: string /* 'Sí' | 'No' | '' */
+  fechaParto: string /* yyyy-mm-dd; solo si embarazo = Sí */
+  departamento: string /* fijo: Chalatenango */
+  distrito: string
+  canton: string
+  caserio: string
+  caserioOtro: string
+  tipoCalle: string
+  medioTransporte: string
+  transporteOtro: string
+  factoresRiesgo: string /* opcional, texto libre */
+  trabaja: string /* 'Sí' | 'No' | '' (opcional) */
+  dependenciaEconomica: string
+  dependenciaOtro: string
+  ocupacion: string /* opcional */
+  ocupacionOtro: string
+  tipoSangre: string /* opcional */
+  propiedadVivienda: string
+  propiedadOtra: string
+  serviciosBasicos: string[]
+  accesoInternet: string /* 'Sí' | 'No' | '' */
+  remesas: string /* 'Sí' | 'No' | '' (opcional) */
+  hijos: string /* 'Sí' | 'No' | '' (opcional) */
+  emigrados: string /* número positivo, de cero en adelante */
+  grado: string /* GRADO QUE CURSARÁ (Segundo a Noveno) */
+}
+
+const FORM_BASICA_VACIO: DatosEstudianteBasica = {
+  nuevoIngreso: '',
+  nie: '',
+  nombres: '',
+  apellidos: '',
+  fechaNacimiento: '',
+  sexo: '',
+  nacionalidad: '',
+  naturalizado: '',
+  estadoFamiliar: '',
+  discapacidad: '',
+  discapacidadCual: '',
+  embarazo: '',
+  fechaParto: '',
+  departamento: DEPARTAMENTO_FIJO,
+  distrito: '',
+  canton: '',
+  caserio: NA,
+  caserioOtro: '',
+  tipoCalle: '',
+  medioTransporte: '',
+  transporteOtro: '',
+  factoresRiesgo: '',
+  trabaja: '',
+  dependenciaEconomica: '',
+  dependenciaOtro: '',
+  ocupacion: '',
+  ocupacionOtro: '',
+  tipoSangre: '',
+  propiedadVivienda: '',
+  propiedadOtra: '',
+  serviciosBasicos: [],
+  accesoInternet: '',
+  remesas: '',
+  hijos: '',
+  emigrados: '',
+  grado: '',
+}
+
+const formBasica = reactive<DatosEstudianteBasica>({ ...FORM_BASICA_VACIO })
+
+/* ── Parte 3: datos del responsable de Básica ── */
+interface DatosResponsableBasica {
+  identificacion: string /* solo números, cualquier formato, con guiones */
+  esFamiliar: string /* 'Sí' | 'No' | '' */
+  nombre: string /* nombre completo */
+  fechaNacimiento: string
+  nacionalidad: string /* select de Centroamérica */
+  naturalizado: string /* 'Sí' | 'No' | '' */
+  departamentoNacimiento: string
+  distritoNacimiento: string
+  sexo: string /* 'Masculino' | 'Femenino' | '' */
+  estadoFamiliar: string
+  discapacidad: string /* 'Sí' | 'No' | '' */
+  embarazo: string /* 'Sí' | 'No' | '' */
+  fechaParto: string /* solo si embarazo = Sí */
+  paisTelefono: string /* país del CÓDIGO telefónico (prefijo) */
+  telefono: string /* formateado según el país */
+  profesion: string /* opcional */
+  profesionOtra: string
+  escolaridad: string /* opcional */
+  ocupacion: string
+  ocupacionOtro: string
+}
+
+const RESPONSABLE_BASICA_VACIO: DatosResponsableBasica = {
+  identificacion: '',
+  esFamiliar: '',
+  nombre: '',
+  fechaNacimiento: '',
+  nacionalidad: '',
+  naturalizado: '',
+  departamentoNacimiento: '',
+  distritoNacimiento: '',
+  sexo: '',
+  estadoFamiliar: '',
+  discapacidad: '',
+  embarazo: '',
+  fechaParto: '',
+  paisTelefono: 'El Salvador', /* prefijo por defecto, se puede cambiar */
+  telefono: '',
+  profesion: '',
+  profesionOtra: '',
+  escolaridad: '',
+  ocupacion: '',
+  ocupacionOtro: '',
+}
+
+const respBasica = reactive<DatosResponsableBasica>({ ...RESPONSABLE_BASICA_VACIO })
+
+/* Distritos del departamento de NACIMIENTO del responsable */
+const distritosNacimiento = computed(() => distritosDe(respBasica.departamentoNacimiento))
+
+/* ── Errores de Básica: prefijo "basica." para no chocar con primera infancia ── */
+function claseBasica(campo: string): string {
+  return claseCampo(`basica.${campo}`)
+}
+
+function errorBasica(campo: string): string {
+  return errores[`basica.${campo}`] ?? ''
+}
+
+function radioBasica(valor: string, opcion: string, campo: string): string {
+  return claseRadio(valor, opcion, `basica.${campo}`)
+}
+
+function cuadroBasica(marcada: boolean, campo: string): string {
+  return claseCuadro(marcada, `basica.${campo}`)
+}
+
+function limpiarErrorBasica(campo: string): void {
+  delete errores[`basica.${campo}`]
+}
+
+/* ── Handlers de la parte 2 (estudiante de Básica) ── */
+function alBasicaNuevoIngreso(): void {
+  limpiarErrorBasica('nuevoIngreso')
+  if (formBasica.nuevoIngreso !== 'Sí') limpiarErrorBasica('nie')
+}
+
+function alBasicaNIE(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.nie = soloDigitos(campo.value)
+  campo.value = formBasica.nie
+  limpiarErrorBasica('nie')
+}
+
+function alBasicaNombres(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.nombres = soloNombre(campo.value)
+  campo.value = formBasica.nombres
+  limpiarErrorBasica('nombres')
+}
+
+function alBasicaApellidos(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.apellidos = soloNombre(campo.value)
+  campo.value = formBasica.apellidos
+  limpiarErrorBasica('apellidos')
+}
+
+function alBasicaNacionalidad(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.nacionalidad = soloTexto(campo.value)
+  campo.value = formBasica.nacionalidad
+  limpiarErrorBasica('nacionalidad')
+}
+
+function alBasicaDiscapacidad(): void {
+  limpiarErrorBasica('discapacidad')
+  if (formBasica.discapacidad !== 'Sí') {
+    formBasica.discapacidadCual = ''
+    limpiarErrorBasica('discapacidadCual')
+  }
+}
+
+function alBasicaDiscapacidadCual(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.discapacidadCual = soloTexto(campo.value)
+  campo.value = formBasica.discapacidadCual
+  limpiarErrorBasica('discapacidadCual')
+}
+
+function alBasicaEmbarazo(): void {
+  limpiarErrorBasica('embarazo')
+  if (formBasica.embarazo !== 'Sí') {
+    formBasica.fechaParto = ''
+    limpiarErrorBasica('fechaParto')
+  }
+}
+
+function alBasicaDistrito(): void {
+  limpiarErrorBasica('distrito')
+  formBasica.caserioOtro = ''
+  limpiarErrorBasica('canton')
+}
+
+function alBasicaCanton(): void {
+  limpiarErrorBasica('canton')
+  formBasica.caserioOtro = ''
+}
+
+function alBasicaCaserio(): void {
+  if (formBasica.caserio !== OTRO_CASERIO) formBasica.caserioOtro = ''
+  limpiarErrorBasica('caserio')
+  limpiarErrorBasica('caserioOtro')
+}
+
+function alBasicaCaserioOtro(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.caserioOtro = soloTexto(campo.value)
+  campo.value = formBasica.caserioOtro
+  limpiarErrorBasica('caserioOtro')
+}
+
+function alBasicaTransporte(): void {
+  limpiarErrorBasica('medioTransporte')
+  if (formBasica.medioTransporte !== OTRO_TRANSPORTE) {
+    formBasica.transporteOtro = ''
+    limpiarErrorBasica('transporteOtro')
+  }
+}
+
+function alBasicaTransporteOtro(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.transporteOtro = soloTexto(campo.value)
+  campo.value = formBasica.transporteOtro
+  limpiarErrorBasica('transporteOtro')
+}
+
+function alBasicaFactores(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.factoresRiesgo = soloLibre(campo.value)
+  campo.value = formBasica.factoresRiesgo
+}
+
+function alBasicaDependencia(): void {
+  limpiarErrorBasica('dependenciaEconomica')
+  if (formBasica.dependenciaEconomica !== OTROS_DEPENDENCIA) {
+    formBasica.dependenciaOtro = ''
+    limpiarErrorBasica('dependenciaOtro')
+  }
+}
+
+function alBasicaDependenciaOtro(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.dependenciaOtro = soloTexto(campo.value)
+  campo.value = formBasica.dependenciaOtro
+  limpiarErrorBasica('dependenciaOtro')
+}
+
+function alBasicaOcupacion(): void {
+  limpiarErrorBasica('ocupacion')
+  if (formBasica.ocupacion !== OTRO_OCUPACION) {
+    formBasica.ocupacionOtro = ''
+    limpiarErrorBasica('ocupacionOtro')
+  }
+}
+
+function alBasicaOcupacionOtro(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.ocupacionOtro = soloTexto(campo.value)
+  campo.value = formBasica.ocupacionOtro
+  limpiarErrorBasica('ocupacionOtro')
+}
+
+function alBasicaPropiedad(): void {
+  limpiarErrorBasica('propiedadVivienda')
+  if (formBasica.propiedadVivienda !== OTRA_PROPIEDAD) {
+    formBasica.propiedadOtra = ''
+    limpiarErrorBasica('propiedadOtra')
+  }
+}
+
+function alBasicaPropiedadOtra(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.propiedadOtra = soloTexto(campo.value)
+  campo.value = formBasica.propiedadOtra
+  limpiarErrorBasica('propiedadOtra')
+}
+
+function alBasicaServicios(clave: string): void {
+  limpiarErrorBasica(clave)
+}
+
+function alBasicaEmigrados(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  formBasica.emigrados = soloDigitos(campo.value).slice(0, 3)
+  campo.value = formBasica.emigrados
+}
+
+/* ── Handlers de la parte 3 (responsable de Básica) ── */
+/* Identificación: solo números, cualquier formato, se permiten guiones */
+function soloIdentificacion(valor: string): string {
+  return valor.replace(/[^0-9-]/g, '').slice(0, 20)
+}
+
+function alBasicaIdentificacion(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  respBasica.identificacion = soloIdentificacion(campo.value)
+  campo.value = respBasica.identificacion
+  limpiarErrorBasica('identificacion')
+}
+
+function alBasicaFamiliar(): void {
+  limpiarErrorBasica('esFamiliar')
+}
+
+function alBasicaNombreResponsable(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  respBasica.nombre = soloNombre(campo.value)
+  campo.value = respBasica.nombre
+  limpiarErrorBasica('nombre')
+}
+
+function alBasicaDepartamentoNacimiento(): void {
+  respBasica.distritoNacimiento = ''
+  limpiarErrorBasica('departamentoNacimiento')
+  limpiarErrorBasica('distritoNacimiento')
+}
+
+function alBasicaEmbarazoResponsable(): void {
+  limpiarErrorBasica('embarazo')
+  if (respBasica.embarazo !== 'Sí') {
+    respBasica.fechaParto = ''
+    limpiarErrorBasica('fechaPartoResp')
+  }
+}
+
+function alBasicaPaisTelefono(): void {
+  /* Al cambiar el prefijo, los números ya escritos se reformatean */
+  respBasica.telefono = formatarTelefono(respBasica.paisTelefono, respBasica.telefono)
+  limpiarErrorBasica('paisTelefono')
+  limpiarErrorBasica('telefono')
+}
+
+function alBasicaTelefono(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  respBasica.telefono = formatarTelefono(respBasica.paisTelefono, campo.value)
+  campo.value = respBasica.telefono
+  limpiarErrorBasica('telefono')
+}
+
+function alBasicaProfesion(): void {
+  limpiarErrorBasica('profesion')
+  if (respBasica.profesion !== OTRO_OCUPACION) {
+    respBasica.profesionOtra = ''
+    limpiarErrorBasica('profesionOtra')
+  }
+}
+
+function alBasicaProfesionOtra(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  respBasica.profesionOtra = soloTexto(campo.value)
+  campo.value = respBasica.profesionOtra
+  limpiarErrorBasica('profesionOtra')
+}
+
+function alBasicaOcupacionResponsable(): void {
+  limpiarErrorBasica('ocupacionResp')
+  if (respBasica.ocupacion !== OTRO_OCUPACION) {
+    respBasica.ocupacionOtro = ''
+    limpiarErrorBasica('ocupacionOtroResp')
+  }
+}
+
+function alBasicaOcupacionOtroResponsable(evento: Event): void {
+  const campo = evento.target as HTMLInputElement
+  respBasica.ocupacionOtro = soloTexto(campo.value)
+  campo.value = respBasica.ocupacionOtro
+  limpiarErrorBasica('ocupacionOtroResp')
+}
+
+/* ── Validación de Básica ── */
+function validarBasicaEstudiante(): Record<string, string> {
+  const fallos: Record<string, string> = {}
+  const k = (campo: string) => `basica.${campo}`
+
+  if (!formBasica.nuevoIngreso) {
+    fallos[k('nuevoIngreso')] = 'Indica si es nuevo ingreso al sistema de El Salvador.'
+  }
+  if (formBasica.nuevoIngreso === 'Sí') {
+    /* NUEVO INGRESO: el NIE NO es obligatorio; si trae uno escrito igual
+       se valida. */
+    if (formBasica.nie && formBasica.nie.length < 6) {
+      fallos[k('nie')] = 'El NIE necesita al menos 6 dígitos.'
+    }
+  } else if (formBasica.nie.length < 6) {
+    fallos[k('nie')] = formBasica.nie
+      ? 'El NIE necesita al menos 6 dígitos.'
+      : 'Ingresa el NIE del estudiante.'
+  }
+  if (!formBasica.nombres.trim()) fallos[k('nombres')] = 'Ingresa los nombres.'
+  if (!formBasica.apellidos.trim()) fallos[k('apellidos')] = 'Ingresa los apellidos.'
+  if (!formBasica.fechaNacimiento) {
+    fallos[k('fechaNacimiento')] = 'Selecciona la fecha de nacimiento.'
+  } else if (formBasica.fechaNacimiento > hoyISO) {
+    fallos[k('fechaNacimiento')] = 'La fecha de nacimiento no puede ser futura.'
+  }
+  if (!formBasica.sexo) fallos[k('sexo')] = 'Selecciona el sexo.'
+  if (!formBasica.nacionalidad.trim()) fallos[k('nacionalidad')] = 'Ingresa la nacionalidad.'
+  if (!formBasica.naturalizado) fallos[k('naturalizado')] = 'Indica si es naturalizado.'
+  if (!formBasica.estadoFamiliar) fallos[k('estadoFamiliar')] = 'Selecciona el estado familiar.'
+  if (!formBasica.discapacidad) fallos[k('discapacidad')] = 'Indica si tiene alguna discapacidad.'
+  if (formBasica.discapacidad === 'Sí' && !formBasica.discapacidadCual.trim()) {
+    fallos[k('discapacidadCual')] = 'Especifica la discapacidad.'
+  }
+  if (!formBasica.embarazo) fallos[k('embarazo')] = 'Indica si está embarazada.'
+  if (formBasica.embarazo === 'Sí') {
+    if (!formBasica.fechaParto) fallos[k('fechaParto')] = 'Selecciona la fecha de parto.'
+    else if (formBasica.fechaParto > hoyISO) {
+      fallos[k('fechaParto')] = 'La fecha de parto no puede ser futura.'
+    }
+  }
+  if (!formBasica.distrito) fallos[k('distrito')] = 'Selecciona el distrito.'
+  if (!formBasica.canton) fallos[k('canton')] = 'Selecciona el cantón.'
+  if (formBasica.caserio === OTRO_CASERIO && !formBasica.caserioOtro.trim()) {
+    fallos[k('caserioOtro')] = 'Especifica el caserío.'
+  }
+  if (!formBasica.tipoCalle) fallos[k('tipoCalle')] = 'Selecciona el tipo de calle.'
+  if (!formBasica.medioTransporte) fallos[k('medioTransporte')] = 'Selecciona el medio de transporte.'
+  if (formBasica.medioTransporte === OTRO_TRANSPORTE && !formBasica.transporteOtro.trim()) {
+    fallos[k('transporteOtro')] = 'Especifica el medio de transporte.'
+  }
+  if (!formBasica.dependenciaEconomica) {
+    fallos[k('dependenciaEconomica')] = 'Selecciona la dependencia económica.'
+  }
+  if (formBasica.dependenciaEconomica === OTROS_DEPENDENCIA && !formBasica.dependenciaOtro.trim()) {
+    fallos[k('dependenciaOtro')] = 'Especifica la dependencia.'
+  }
+  if (formBasica.ocupacion === OTRO_OCUPACION && !formBasica.ocupacionOtro.trim()) {
+    fallos[k('ocupacionOtro')] = 'Especifica la ocupación.'
+  }
+  if (!formBasica.propiedadVivienda) {
+    fallos[k('propiedadVivienda')] = 'Selecciona la propiedad de la vivienda.'
+  }
+  if (formBasica.propiedadVivienda === OTRA_PROPIEDAD && !formBasica.propiedadOtra.trim()) {
+    fallos[k('propiedadOtra')] = 'Especifica la propiedad.'
+  }
+  if (formBasica.serviciosBasicos.length === 0) {
+    fallos[k('serviciosBasicos')] = 'Marca al menos un servicio básico.'
+  }
+  if (!formBasica.accesoInternet) fallos[k('accesoInternet')] = 'Indica si tiene acceso a internet.'
+  if (!formBasica.grado) fallos[k('grado')] = 'Selecciona el grado que cursará.'
+
+  return fallos
+}
+
+function validarBasicaResponsable(): Record<string, string> {
+  const fallos: Record<string, string> = {}
+  const k = (campo: string) => `basica.${campo}`
+
+  if (!respBasica.identificacion.trim()) {
+    fallos[k('identificacion')] = 'Ingresa la identificación (solo números, con guiones si hace falta).'
+  }
+  if (!respBasica.esFamiliar) fallos[k('esFamiliar')] = 'Indica si es familiar.'
+  if (!respBasica.nombre.trim()) fallos[k('nombre')] = 'Ingresa el nombre completo.'
+  if (!respBasica.fechaNacimiento) {
+    fallos[k('fechaNacimiento')] = 'Selecciona la fecha de nacimiento.'
+  } else if (respBasica.fechaNacimiento > hoyISO) {
+    fallos[k('fechaNacimiento')] = 'La fecha de nacimiento no puede ser futura.'
+  }
+  if (!respBasica.nacionalidad) fallos[k('nacionalidad')] = 'Selecciona la nacionalidad.'
+  if (!respBasica.naturalizado) fallos[k('naturalizado')] = 'Indica si es naturalizado.'
+  if (!respBasica.departamentoNacimiento) {
+    fallos[k('departamentoNacimiento')] = 'Selecciona el departamento de nacimiento.'
+  }
+  if (!respBasica.distritoNacimiento) {
+    fallos[k('distritoNacimiento')] = 'Selecciona el distrito de nacimiento.'
+  }
+  if (!respBasica.sexo) fallos[k('sexo')] = 'Selecciona el sexo.'
+  if (!respBasica.estadoFamiliar) fallos[k('estadoFamiliar')] = 'Selecciona el estado familiar.'
+  if (!respBasica.discapacidad) fallos[k('discapacidad')] = 'Indica si tiene alguna discapacidad.'
+  if (!respBasica.embarazo) fallos[k('embarazo')] = 'Indica si está embarazada.'
+  if (respBasica.embarazo === 'Sí') {
+    if (!respBasica.fechaParto) fallos[k('fechaPartoResp')] = 'Selecciona la fecha de parto.'
+    else if (respBasica.fechaParto > hoyISO) {
+      fallos[k('fechaPartoResp')] = 'La fecha de parto no puede ser futura.'
+    }
+  }
+
+  /* Teléfono (opcional): si se escribió el número, hace falta el prefijo;
+     si se eligió el prefijo, hace falta el número. */
+  const definidos = paisPorNombre(respBasica.paisTelefono)?.digitos ?? 0
+  if (respBasica.telefono && !respBasica.paisTelefono) {
+    fallos[k('paisTelefono')] = 'Selecciona el código del país.'
+  } else if (respBasica.paisTelefono && !respBasica.telefono) {
+    fallos[k('telefono')] = 'Ingresa el número de teléfono o deja el prefijo en blanco.'
+  } else if (respBasica.telefono) {
+    if (definidos && soloDigitos(respBasica.telefono).length !== definidos) {
+      fallos[k('telefono')] = `El número necesita ${definidos} dígitos para ese país.`
+    } else if (!definidos && soloDigitos(respBasica.telefono).length < 6) {
+      fallos[k('telefono')] = 'El número necesita al menos 6 dígitos.'
+    }
+  }
+
+  if (respBasica.profesion === OTRO_OCUPACION && !respBasica.profesionOtra.trim()) {
+    fallos[k('profesionOtra')] = 'Especifica la profesión.'
+  }
+  if (!respBasica.ocupacion) fallos[k('ocupacionResp')] = 'Selecciona la ocupación.'
+  if (respBasica.ocupacion === OTRO_OCUPACION && !respBasica.ocupacionOtro.trim()) {
+    fallos[k('ocupacionOtroResp')] = 'Especifica la ocupación.'
+  }
+
+  return fallos
+}
+
+/* ── Navegación del asistente de Básica ── */
+function limpiarErrorBasicaTodo(): void {
+  for (const clave of Object.keys(errores)) {
+    if (clave.startsWith('basica.')) delete errores[clave]
+  }
+}
+
+async function siguienteBasica(): Promise<void> {
+  limpiarErrorBasicaTodo()
+  let fallos: Record<string, string> = {}
+  if (pasoBasica.value === 0) {
+    if (centroFaltante.value.length > 0) {
+      ui.notificar(
+        'error',
+        'La información del centro está incompleta: complétala en Configuración › Informacion CE.',
+      )
+      return
+    }
+    pasoBasica.value += 1
+    return
+  }
+  if (pasoBasicaActual.value.id === 'basica-estudiante') {
+    fallos = validarBasicaEstudiante()
+  } else {
+    fallos = validarBasicaResponsable()
+  }
+  Object.assign(errores, fallos)
+  if (Object.keys(fallos).length > 0) {
+    ui.notificar('error', 'Faltan campos requeridos: revisa lo marcado en rojo.')
+    return
+  }
+  /* MATRÍCULA INTELIGENTE: al salir de la parte del estudiante se revisa
+     en Firebase que el nombre y el NIE no pertenezcan ya a otro estudiante. */
+  if (pasoBasicaActual.value.id === 'basica-estudiante') {
+    ui.iniciarCarga('Revisando si el estudiante ya está matriculado…')
+    let libre = false
+    try {
+      libre = await revisarDuplicadosEstudiante(
+        { nombres: formBasica.nombres, apellidos: formBasica.apellidos, nie: formBasica.nie },
+        { nombres: 'basica.nombres', apellidos: 'basica.apellidos', nie: 'basica.nie' },
+      )
+    } catch (e) {
+      ui.notificar('precaucion', `No se pudo revisar si ya está matriculado: ${mensajeError(e)}`)
+      libre = true
+    } finally {
+      ui.terminarCarga()
+    }
+    if (!libre) return
+  }
+  if (pasoBasica.value < PASOS_BASICA.length - 1) pasoBasica.value += 1
+}
+
+function anteriorBasica(): void {
+  pasoBasica.value = Math.max(0, pasoBasica.value - 1)
+}
+
+/* ── Columnas de la fila del libro (hoja "basica") ── */
+function columnasBasica(): Record<string, string> {
+  const r = respBasica
+  return {
+    'Fecha de registro': fechaHora(new Date()),
+    '¿Es nuevo ingreso al sistema de El Salvador?': formBasica.nuevoIngreso,
+    NIE: formBasica.nie,
+    Nombres: formBasica.nombres,
+    Apellidos: formBasica.apellidos,
+    'Fecha de nacimiento (estudiante)': fechaCorta(formBasica.fechaNacimiento),
+    Sexo: formBasica.sexo,
+    'Nacionalidad (estudiante)': formBasica.nacionalidad,
+    '¿Es naturalizado? (estudiante)': formBasica.naturalizado,
+    'Estado familiar (estudiante)':
+      formBasica.estadoFamiliar === NA ? '' : formBasica.estadoFamiliar,
+    /* Etnia es un campo DESACTIVADO que muestra N/A: se guarda en blanco */
+    Etnia: '',
+    'Tiene alguna discapacidad (estudiante)': formBasica.discapacidad,
+    'Discapacidad especifique (estudiante)':
+      formBasica.discapacidad === 'Sí' ? formBasica.discapacidadCual : '',
+    'Embarazo (estudiante)': formBasica.embarazo,
+    'Fecha de parto (estudiante)':
+      formBasica.embarazo === 'Sí' ? fechaCorta(formBasica.fechaParto) : '',
+    'Departamento (estudiante)': formBasica.departamento,
+    'Distrito (estudiante)': formBasica.distrito,
+    'Cantón (estudiante)': formBasica.canton,
+    'Caserío (estudiante)': valorCaserio(formBasica.caserio, formBasica.caserioOtro),
+    'Caserío especifique (estudiante)':
+      formBasica.caserio === OTRO_CASERIO ? formBasica.caserioOtro : '',
+    'Grado que cursa': formBasica.grado,
+    'Grado (id)': String(idDeGrado(formBasica.grado) ?? ''),
+    'Tipo de calle': formBasica.tipoCalle === NA ? '' : formBasica.tipoCalle,
+    'Medio de transporte':
+      formBasica.medioTransporte === OTRO_TRANSPORTE || formBasica.medioTransporte === NA
+        ? ''
+        : formBasica.medioTransporte,
+    'Transporte especifique':
+      formBasica.medioTransporte === OTRO_TRANSPORTE ? formBasica.transporteOtro : '',
+    'Factores de riesgo en camino': formBasica.factoresRiesgo,
+    'Trabaja el estudiante': formBasica.trabaja,
+    'Dependencia económica del estudiante':
+      formBasica.dependenciaEconomica === OTROS_DEPENDENCIA || formBasica.dependenciaEconomica === NA
+        ? ''
+        : formBasica.dependenciaEconomica,
+    'Dependencia especifique':
+      formBasica.dependenciaEconomica === OTROS_DEPENDENCIA ? formBasica.dependenciaOtro : '',
+    'Ocupación del estudiante':
+      formBasica.ocupacion === OTRO_OCUPACION || formBasica.ocupacion === NA
+        ? ''
+        : formBasica.ocupacion,
+    'Ocupación especifique (estudiante)':
+      formBasica.ocupacion === OTRO_OCUPACION ? formBasica.ocupacionOtro : '',
+    'Tipo de sangre': formBasica.tipoSangre === NA ? '' : formBasica.tipoSangre,
+    'Propiedad de la vivienda':
+      formBasica.propiedadVivienda === OTRA_PROPIEDAD || formBasica.propiedadVivienda === NA
+        ? ''
+        : formBasica.propiedadVivienda,
+    'Vivienda especifique':
+      formBasica.propiedadVivienda === OTRA_PROPIEDAD ? formBasica.propiedadOtra : '',
+    'Servicios básicos': formBasica.serviciosBasicos.join(', '),
+    'Acceso a internet': formBasica.accesoInternet,
+    'Recibe remesas': formBasica.remesas,
+    'El estudiante tiene hijos': formBasica.hijos,
+    'Personas del grupo familiar que han emigrado': formBasica.emigrados,
+    'Identificación (responsable)': r.identificacion,
+    '¿Es familiar? (responsable)': r.esFamiliar,
+    'Nombre completo (responsable)': r.nombre,
+    'Fecha de nacimiento (responsable)': fechaCorta(r.fechaNacimiento),
+    'Nacionalidad (responsable)': r.nacionalidad,
+    '¿Es naturalizado? (responsable)': r.naturalizado,
+    'Departamento de nacimiento (responsable)': r.departamentoNacimiento,
+    'Distrito de nacimiento (responsable)': r.distritoNacimiento,
+    'Sexo (responsable)': r.sexo,
+    'Estado familiar (responsable)': r.estadoFamiliar === NA ? '' : r.estadoFamiliar,
+    'Tiene alguna discapacidad (responsable)': r.discapacidad,
+    'Embarazo (responsable)': r.embarazo,
+    'Fecha de parto (responsable)': r.embarazo === 'Sí' ? fechaCorta(r.fechaParto) : '',
+    'Código de teléfono (responsable)': codigoTelefono(r.paisTelefono),
+    'Teléfono (responsable)': r.telefono,
+    'Profesión (responsable)': r.profesion === OTRO_OCUPACION ? '' : r.profesion,
+    'Profesión especifique (responsable)':
+      r.profesion === OTRO_OCUPACION ? r.profesionOtra : '',
+    'Escolaridad (responsable)': r.escolaridad,
+    'Ocupación (responsable)': r.ocupacion === OTRO_OCUPACION ? '' : r.ocupacion,
+    'Ocupación especifique (responsable)':
+      r.ocupacion === OTRO_OCUPACION ? r.ocupacionOtro : '',
+  }
+}
+
+/* ── Guardar Básica: hoja "basica" + Firebase ── */
+async function guardarBasica(): Promise<void> {
+  limpiarErrorBasicaTodo()
+  const fallos = validarBasicaResponsable()
+  Object.assign(errores, fallos)
+  if (Object.keys(fallos).length > 0) {
+    ui.notificar('error', 'Faltan campos requeridos: revisa lo marcado en rojo.')
+    return
+  }
+
+  ui.iniciarCarga('Guardando la matrícula…')
+  try {
+    /* 1) Sheet "estudiantes" (hoja "basica"): TODOS los datos. El Apps
+       Script vuelve a revisar duplicados antes de escribir. */
+    await guardarEstudiante(
+      HOJA_BASICA,
+      columnasBasica(),
+      nombreCompleto(formBasica.nombres, formBasica.apellidos),
+      formBasica.nie,
+    )
+
+    /* 2) Firebase: SOLO los datos importantes. El id del documento es el
+       id de clase + nombre completo en minúsculas y sin espacios. El
+       correo del NUEVO INGRESO queda en blanco hasta Actualizar. */
+    await crearEstudiante({
+      nombres: formBasica.nombres,
+      apellidos: formBasica.apellidos,
+      nie: formBasica.nie,
+      nuevoIngreso: formBasica.nuevoIngreso === 'Sí',
+      fechaNacimiento: formBasica.fechaNacimiento,
+      grado: formBasica.grado,
+      gradoId: idDeGrado(formBasica.grado) ?? 0,
+      responsable: respBasica.nombre,
+      documento: respBasica.identificacion,
+      telefono: `${codigoTelefono(respBasica.paisTelefono)} ${respBasica.telefono}`.trim(),
+    })
+
+    ui.notificar('exito', 'Matrícula guardada en el Sheet "estudiantes" (basica) y en Firebase.')
+    olvidarBorrador()
+    limpiarWizard()
+  } catch (e) {
+    ui.notificar('error', `No se pudo guardar la matrícula: ${mensajeError(e)}`)
+  } finally {
+    ui.terminarCarga()
+  }
+}
+
+
 /* ── Responsable (elegido en el modal al salir de la parte 2.4) ── */
 const responsableElegido = ref<ClavePersona | ''>('')
 const modalResponsable = ref(false)
@@ -782,7 +1645,6 @@ function alCaserio() {
 
 /* Handlers de las partes de persona (2.2, 2.3 y 2.4): todos trabajan sobre
    la persona del paso en pantalla (p) y usan el prefijo del paso en errores */
-
 function alTienePersona(): void {
   if (!p.value) return
   const pref = pasoActual.value.id
@@ -1063,12 +1925,6 @@ function alHabitoTexto(campo: 'suenoNoche' | 'suenoDia' | 'dificultadExplica' | 
   limpiarError(clave)
 }
 
-function alObservaciones(evento: Event): void {
-  const campo = evento.target as HTMLInputElement
-  participacion.observaciones = soloLibre(campo.value)
-  campo.value = participacion.observaciones
-}
-
 function alDocenteResponsable(evento: Event): void {
   const campo = evento.target as HTMLInputElement
   modalidadAtencion.docente = soloNombre(campo.value)
@@ -1083,6 +1939,7 @@ function alDocenteResponsable(evento: Event): void {
    CANCELAR recupera los datos y sigue donde quedó. El botón CANCELAR (en
    la barra de nivel) hace lo mismo. La clave es POR USUARIO. */
 const CAMPOS_DRAFT: (keyof DatosEstudiante)[] = [
+  'nuevoIngreso',
   'nie',
   'nombres',
   'apellidos',
@@ -1115,6 +1972,11 @@ interface BorradorMatricula {
   participacion: typeof participacion
   atencion: typeof modalidadAtencion
   responsable: ClavePersona | ''
+  basica: {
+    paso: number
+    form: DatosEstudianteBasica
+    responsable: DatosResponsableBasica
+  }
 }
 
 function personaEscrita(persona: DatosPersona): boolean {
@@ -1207,7 +2069,86 @@ function hayDatosEscritos(): boolean {
     !modalidadAtencion.institucional ||
     modalidadAtencion.fechaInscripcion !== hoyISO ||
     modalidadAtencion.docente !== docenteSugerido
-  return estudiante || gente || seccionesEscritas() || atencionTocada
+  return estudiante || gente || seccionesEscritas() || atencionTocada || hayDatosEscritosBasica()
+}
+
+/* Campos de Básica que se vigilan para el borrador (los fijos y los
+   valores iniciales NO cuentan) */
+const CAMPOS_DRAFT_BASICA: (keyof DatosEstudianteBasica)[] = [
+  'nuevoIngreso',
+  'nie',
+  'nombres',
+  'apellidos',
+  'fechaNacimiento',
+  'sexo',
+  'nacionalidad',
+  'naturalizado',
+  'estadoFamiliar',
+  'discapacidad',
+  'discapacidadCual',
+  'embarazo',
+  'fechaParto',
+  'distrito',
+  'canton',
+  'caserio',
+  'caserioOtro',
+  'tipoCalle',
+  'medioTransporte',
+  'transporteOtro',
+  'factoresRiesgo',
+  'trabaja',
+  'dependenciaEconomica',
+  'dependenciaOtro',
+  'ocupacion',
+  'ocupacionOtro',
+  'tipoSangre',
+  'propiedadVivienda',
+  'propiedadOtra',
+  'serviciosBasicos',
+  'accesoInternet',
+  'remesas',
+  'hijos',
+  'emigrados',
+  'grado',
+]
+
+const CAMPOS_DRAFT_RESP: (keyof DatosResponsableBasica)[] = [
+  'identificacion',
+  'esFamiliar',
+  'nombre',
+  'fechaNacimiento',
+  'nacionalidad',
+  'naturalizado',
+  'departamentoNacimiento',
+  'distritoNacimiento',
+  'sexo',
+  'estadoFamiliar',
+  'discapacidad',
+  'embarazo',
+  'fechaParto',
+  'paisTelefono',
+  'telefono',
+  'profesion',
+  'profesionOtra',
+  'escolaridad',
+  'ocupacion',
+  'ocupacionOtro',
+]
+
+function hayDatosEscritosBasica(): boolean {
+  const estudiante = CAMPOS_DRAFT_BASICA.some((clave) => {
+    const valor = formBasica[clave]
+    const inicial = FORM_BASICA_VACIO[clave]
+    if (Array.isArray(valor)) return valor.length > 0
+    return String(valor ?? '').trim() !== String(inicial ?? '').trim()
+  })
+  const responsable = CAMPOS_DRAFT_RESP.some((clave) => {
+    const valor = respBasica[clave]
+    const inicial = RESPONSABLE_BASICA_VACIO[clave]
+    if (Array.isArray(valor)) return valor.length > 0
+    return String(valor ?? '').trim() !== String(inicial ?? '').trim()
+  })
+  return estudiante || responsable
 }
 
 function limpiarWizard(): void {
@@ -1264,6 +2205,9 @@ function limpiarWizard(): void {
   modalidadAtencion.fechaInscripcion = hoyISO
   modalidadAtencion.docente = auth.perfil?.nombre ?? docenteSugerido
   responsableElegido.value = ''
+  Object.assign(formBasica, { ...FORM_BASICA_VACIO })
+  Object.assign(respBasica, { ...RESPONSABLE_BASICA_VACIO })
+  pasoBasica.value = 0
   for (const clave of Object.keys(errores)) delete errores[clave]
 }
 
@@ -1296,6 +2240,11 @@ const {
       participacion: { ...participacion },
       atencion: { ...modalidadAtencion },
       responsable: responsableElegido.value,
+      basica: {
+        paso: pasoBasica.value,
+        form: { ...formBasica },
+        responsable: { ...respBasica },
+      },
     }
   },
   restaurar: (datos: BorradorMatricula) => {
@@ -1303,7 +2252,7 @@ const {
     paso.value = Math.min(Math.max(datos.paso ?? 0, 0), PASOS.length - 1)
     Object.assign(form, { ...FORM_VACIO, ...datos.form })
     for (const clave of CLAVES_PERSONA) {
-      Object.assign(personas[clave], { ...PERSONA_VACIA, ...datos.personas?.[clave] })
+      Object.assign(personas[clave], { ...PERSONA_VACIA, ...(datos.personas?.[clave] )})
     }
     Object.assign(discapacidad, datos.discapacidad ?? {})
     convivencia.value = datos.convivencia ?? ''
@@ -1313,6 +2262,10 @@ const {
     Object.assign(participacion, datos.participacion ?? {})
     Object.assign(modalidadAtencion, datos.atencion ?? {})
     responsableElegido.value = datos.responsable ?? ''
+    /* Educación básica: se restaura su propio paso y formularios */
+    pasoBasica.value = Math.min(Math.max(datos.basica?.paso ?? 0, 0), PASOS_BASICA.length - 1)
+    Object.assign(formBasica, { ...FORM_BASICA_VACIO, ...(datos.basica?.form) })
+    Object.assign(respBasica, { ...RESPONSABLE_BASICA_VACIO, ...(datos.basica?.responsable) })
     /* Con la modalidad recuperada, el modal de elección ya no hace falta */
     if (modalidad.value) modalAbierto.value = false
   },
@@ -1336,6 +2289,9 @@ vigilar(() => [
   participacion,
   modalidadAtencion,
   responsableElegido.value,
+  pasoBasica.value,
+  formBasica,
+  respBasica,
 ])
 
 /* Al entrar a la vista: si quedó borrador, se pide la reconfirmación */
@@ -1355,7 +2311,17 @@ function cancelarWizard(): void {
 function validarEstudiante(): Record<string, string> {
   const fallos: Record<string, string> = {}
 
-  if (form.nie.length < 6) {
+  /* NUEVO INGRESO: si es Sí, el NIE NO es obligatorio (aún no lo emiten);
+     si trae un NIE escrito igual se valida, y si NO es nuevo ingreso,
+     el NIE es requerido como siempre. */
+  if (!form.nuevoIngreso) {
+    fallos.nuevoIngreso = 'Indica si es nuevo ingreso al sistema de El Salvador.'
+  }
+  if (form.nuevoIngreso === 'Sí') {
+    if (form.nie && form.nie.length < 6) {
+      fallos.nie = 'El NIE necesita al menos 6 dígitos.'
+    }
+  } else if (form.nie.length < 6) {
     fallos.nie = form.nie ? 'El NIE necesita al menos 6 dígitos.' : 'Ingresa el NIE del estudiante.'
   }
   if (!form.nombres.trim()) fallos.nombres = 'Ingresa los nombres.'
@@ -1699,8 +2665,28 @@ function cerrarModalResponsable(): void {
   modalResponsable.value = false
 }
 
-function siguiente() {
+async function siguiente(): Promise<void> {
   if (!validarParteActual()) return
+  /* MATRÍCULA INTELIGENTE: al salir de la parte 2.1 se revisa en Firebase
+     que el nombre completo y el NIE no pertenezcan ya a otro estudiante. */
+  if (pasoActual.value.id === 'estudiante') {
+    ui.iniciarCarga('Revisando si el estudiante ya está matriculado…')
+    let libre = false
+    try {
+      libre = await revisarDuplicadosEstudiante(
+        { nombres: form.nombres, apellidos: form.apellidos, nie: form.nie },
+        { nombres: 'nombres', apellidos: 'apellidos', nie: 'nie' },
+      )
+    } catch (e) {
+      /* Si Firebase no responde, la revisión NO bloquea el paso: el Apps
+         Script repite la revisión en el Sheet antes de guardar. */
+      ui.notificar('precaucion', `No se pudo revisar si ya está matriculado: ${mensajeError(e)}`)
+      libre = true
+    } finally {
+      ui.terminarCarga()
+    }
+    if (!libre) return
+  }
   /* Al salir de la parte 2.4 se elige al responsable en un modal */
   if (pasoActual.value.id === 'otra') {
     abrirModalResponsable()
@@ -1716,9 +2702,10 @@ function anterior() {
 /* ── Guardar (parte 9): Sheet "estudiantes" + Firebase ── */
 
 /* Correo que se usará como respaldo para los correos en blanco:
-   el del estudiante (NIE@clases.edu.sv) */
+   el del estudiante (NIE@clases.edu.sv). El NUEVO INGRESO aún no tiene
+   NIE: su correo queda EN BLANCO hasta que se edite en Actualizar. */
 const correoEstudiante = computed(() =>
-  form.nie ? `${form.nie}@clases.edu.sv`.toLowerCase() : '',
+  form.nuevoIngreso === 'Sí' ? '' : form.nie ? `${form.nie}@clases.edu.sv`.toLowerCase() : '',
 )
 
 /* El cantón "sin cantones" y los caseríos N/A se guardan en blanco */
@@ -1779,6 +2766,7 @@ function columnasMatricula(): Record<string, string> {
     CONFIG_PERSONAS.find((c) => c.id === responsableElegido.value)?.etiqueta ?? ''
   return {
     'Fecha de registro': fechaHora(new Date()),
+    '¿Es nuevo ingreso al sistema de El Salvador?': form.nuevoIngreso,
     NIE: form.nie,
     Nombres: form.nombres,
     Apellidos: form.apellidos,
@@ -1866,6 +2854,43 @@ function columnasMatricula(): Record<string, string> {
   }
 }
 
+/* ── Matrícula inteligente: revisión de duplicados en Firebase ──
+   Antes de salir de la parte del estudiante (y en el guardado de Básica)
+   se busca si el NOMBRE COMPLETO ya está matriculado o si el NIE ya
+   pertenece a otra persona; en cualquiera de los dos casos se avisa y no
+   se deja continuar. Si Firebase no se puede consultar (sin conexión o
+   sin permisos), NO se bloquea el paso: el Apps Script repite la revisión
+   en el Sheet antes de guardar. */
+async function revisarDuplicados(
+  nombres: string,
+  apellidos: string,
+  nie: string,
+): Promise<string | null> {
+  const porNombre = await buscarPorNombre(nombres, apellidos)
+  if (porNombre) return mensajeDuplicado(porNombre, false)
+  if (nie.trim()) {
+    const porNie = await buscarPorNie(nie)
+    if (porNie) return mensajeDuplicado(porNie, true)
+  }
+  return null
+}
+
+/* Revisa duplicados de la parte del estudiante (PI y Básica comparten la
+   lógica; el formulario puede tener nie/nombres/apellidos en DISTINTOS
+   estados, así que los valores se pasan aparte). */
+async function revisarDuplicadosEstudiante(
+  datos: { nombres: string; apellidos: string; nie: string },
+  claves: { nombres: string; apellidos: string; nie: string },
+): Promise<boolean> {
+  const aviso = await revisarDuplicados(datos.nombres, datos.apellidos, datos.nie)
+  if (!aviso) return true
+  /* Marca el campo que corresponde para que el error se vea en rojo */
+  if (aviso.includes('NIE')) errores[claves.nie] = aviso
+  else errores[claves.nombres] = aviso
+  ui.notificar('error', aviso)
+  return false
+}
+
 async function guardarTodo(): Promise<void> {
   const fallos = validarAtencion()
   for (const clave of Object.keys(errores)) delete errores[clave]
@@ -1885,15 +2910,24 @@ async function guardarTodo(): Promise<void> {
 
   ui.iniciarCarga('Guardando la matrícula…')
   try {
-    /* 1) Sheet "estudiantes": TODOS los datos (una fila por estudiante) */
-    await guardarEstudiante(columnasMatricula())
+    /* 1) Sheet "estudiantes" (hoja "primera infancia"): TODOS los datos.
+       El Apps Script vuelve a revisar duplicados antes de escribir. */
+    await guardarEstudiante(
+      HOJA_PRIMERA_INFANCIA,
+      columnasMatricula(),
+      nombreCompleto(form.nombres, form.apellidos),
+      form.nie, /* en blanco si es nuevo ingreso y aún no tiene NIE */
+    )
 
-    /* 2) Firebase: SOLO los datos importantes */
+    /* 2) Firebase: SOLO los datos importantes. El id del documento es el
+       id de clase + nombre completo en minúsculas y sin espacios. El
+       correo del NUEVO INGRESO queda en blanco hasta Actualizar. */
     const datosResponsable = personas[responsable]
     await crearEstudiante({
       nombres: form.nombres,
       apellidos: form.apellidos,
       nie: form.nie,
+      nuevoIngreso: form.nuevoIngreso === 'Sí',
       fechaNacimiento: form.fechaNacimiento,
       grado: form.grado,
       gradoId: idDeGrado(form.grado) ?? 0,
@@ -1902,7 +2936,10 @@ async function guardarTodo(): Promise<void> {
       telefono: `${codigoTelefono(datosResponsable.paisTelefono)} ${datosResponsable.telefono}`.trim(),
     })
 
-    ui.notificar('exito', 'Matrícula guardada en el Sheet "estudiantes" y en Firebase.')
+    ui.notificar(
+      'exito',
+      'Matrícula guardada en el Sheet "estudiantes" (primera infancia) y en Firebase.',
+    )
     olvidarBorrador()
     limpiarWizard()
   } catch (e) {
@@ -1952,6 +2989,8 @@ const iconoGuardar = svg(
 </script>
 
 <template>
+
+
   <section class="space-y-4">
     <!-- Sin modalidad elegida todavía -->
     <div
@@ -2096,10 +3135,44 @@ const iconoGuardar = svg(
               </p>
 
               <div class="grid gap-x-6 gap-y-5 sm:grid-cols-2">
-                <!-- NIE -->
+                <!-- ¿Es nuevo ingreso? (PRIMERA pregunta de la parte) -->
+                <div class="sm:col-span-2">
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Es nuevo ingreso al sistema de El Salvador?
+                    <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="claseRadio(form.nuevoIngreso, opcion, 'nuevoIngreso')"
+                    >
+                      <input
+                        v-model="form.nuevoIngreso"
+                        type="radio"
+                        name="m-nuevo-ingreso"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarError('nuevoIngreso')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p class="mt-1 text-xs text-slate-400">
+                    Si es nuevo ingreso, el NIE no es obligatorio y el correo queda en blanco por
+                    el momento: se llenará cuando se edite en Estudiantes › Actualizar.
+                  </p>
+                  <p v-if="errores.nuevoIngreso" class="mt-1 text-xs text-red-600">
+                    {{ errores.nuevoIngreso }}
+                  </p>
+                </div>
+
+                <!-- NIE (obligatorio salvo que sea nuevo ingreso) -->
                 <div>
                   <label for="m-nie" class="text-xs font-semibold text-slate-600">
-                    NIE <span class="text-red-500">*</span>
+                    NIE
+                    <span v-if="form.nuevoIngreso !== 'Sí'" class="text-red-500">*</span>
+                    <span v-else class="font-normal text-slate-400">(opcional: nuevo ingreso)</span>
                   </label>
                   <input
                     id="m-nie"
@@ -3417,8 +4490,7 @@ const iconoGuardar = svg(
                     :key="opcion"
                     :class="claseRadio(vivienda.tenencia, opcion, 'vivienda.tenencia')"
                   >
-                    <input
-                      v-model="vivienda.tenencia"
+                    <input                       v-model="vivienda.tenencia"
                       type="radio"
                       name="m-vivienda-tenencia"
                       :value="opcion"
@@ -4308,15 +5380,1374 @@ const iconoGuardar = svg(
         </div>
       </template>
 
-      <!-- ═══ EDUCACIÓN BÁSICA: se construye después ═══ -->
-      <div
-        v-else
-        class="rounded-xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500"
-      >
-        Aquí se pintará el módulo de matrícula de
-        <strong class="text-slate-700">{{ opcionElegida.nombre }}</strong
-        >. Cuando el flujo exista, este panel se reemplazará por el formulario real.
-      </div>
+      <!-- ═══ EDUCACIÓN BÁSICA: asistente por partes ═══ -->
+      <template v-else>
+        <div class="rounded-xl border border-slate-200 bg-white">
+          <!-- Encabezado del paso -->
+          <div class="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+            <div>
+              <p class="text-xs font-semibold uppercase tracking-wide text-primario">
+                {{ pasoBasicaActual.etiqueta }}
+              </p>
+              <h3 class="text-sm font-bold text-slate-900">{{ pasoBasicaActual.titulo }}</h3>
+            </div>
+            <div class="flex shrink-0 items-center gap-1.5">
+              <span
+                v-for="(pasoItem, i) in PASOS_BASICA"
+                :key="pasoItem.id"
+                class="h-2 rounded-full transition-all"
+                :class="
+                  i === pasoBasica
+                    ? 'w-6 bg-primario'
+                    : i < pasoBasica
+                      ? 'w-2 bg-primario/40'
+                      : 'w-2 bg-slate-200'
+                "
+              ></span>
+              <span class="ml-1 text-xs font-semibold text-slate-400">
+                {{ pasoBasica + 1 }} de {{ PASOS_BASICA.length }}
+              </span>
+            </div>
+          </div>
+
+          <!-- Contenido del paso -->
+          <div class="p-4 sm:p-5">
+            <!-- ══ Parte 1: datos del centro escolar (igual que primera infancia) ══ -->
+            <div v-if="pasoBasica === 0" class="space-y-4">
+              <div
+                v-if="!sheetConfigurado"
+                class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+              >
+                Falta configurar la URL del Sheet de configuración
+                <span class="font-semibold">VITE_SHEET_CONFIGURACION_URL</span> para poder leer los
+                datos del centro.
+              </div>
+              <div
+                v-else-if="centroError"
+                class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+              >
+                No se pudo leer la información del centro: {{ centroError }}.
+                <button
+                  type="button"
+                  class="font-semibold text-primario underline"
+                  @click="cargarCentro"
+                >
+                  Reintentar
+                </button>
+              </div>
+
+              <dl class="grid gap-x-6 gap-y-5 sm:grid-cols-2">
+                <div v-for="campo in CAMPOS_CENTRO" :key="campo.clave">
+                  <dt class="text-xs font-semibold text-slate-600">{{ campo.etiqueta }}</dt>
+                  <dd class="mt-1 min-h-6 whitespace-pre-wrap break-words text-sm text-slate-900">
+                    {{ centro[campo.clave] }}
+                  </dd>
+                </div>
+              </dl>
+
+              <p class="text-xs text-slate-500">
+                Estos datos vienen del Sheet de configuración y aquí no se pueden editar: se cambian
+                en Configuración › Informacion CE.
+              </p>
+
+              <div
+                v-if="sheetConfigurado && !centroError && centroFaltante.length > 0"
+                class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+              >
+                Información incompleta: falta {{ centroFaltante.join(', ') }}. No se puede continuar
+                hasta completarla en Configuración › Informacion CE.
+              </div>
+            </div>
+
+            <!-- ══ Parte 2: datos del estudiante ══ -->
+            <div v-else-if="pasoBasicaActual.id === 'basica-estudiante'" class="space-y-5">
+              <p class="text-xs text-slate-500">
+                Los campos marcados con <span class="font-bold text-red-500">*</span> son
+                requeridos: no se puede continuar sin ellos.
+              </p>
+
+              <div class="grid gap-x-6 gap-y-5 sm:grid-cols-2">
+                <!-- ¿Es nuevo ingreso? (PRIMERA pregunta) -->
+                <div class="sm:col-span-2">
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Es nuevo ingreso al sistema de El Salvador?
+                    <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.nuevoIngreso, opcion, 'nuevoIngreso')"
+                    >
+                      <input
+                        v-model="formBasica.nuevoIngreso"
+                        type="radio"
+                        name="b-nuevo-ingreso"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="alBasicaNuevoIngreso"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p class="mt-1 text-xs text-slate-400">
+                    Si es nuevo ingreso, el NIE no es obligatorio y el correo queda en blanco por
+                    el momento: se llenará cuando se edite en Estudiantes › Actualizar.
+                  </p>
+                  <p v-if="errorBasica('nuevoIngreso')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('nuevoIngreso') }}
+                  </p>
+                </div>
+
+                <!-- NIE (obligatorio salvo que sea nuevo ingreso) -->
+                <div>
+                  <label for="b-nie" class="text-xs font-semibold text-slate-600">
+                    NIE
+                    <span v-if="formBasica.nuevoIngreso !== 'Sí'" class="text-red-500">*</span>
+                    <span v-else class="font-normal text-slate-400">(opcional: nuevo ingreso)</span>
+                  </label>
+                  <input
+                    id="b-nie"
+                    :value="formBasica.nie"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    placeholder="Solo números, mínimo 6"
+                    :class="claseBasica('nie')"
+                    @input="alBasicaNIE"
+                  />
+                  <p v-if="errorBasica('nie')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('nie') }}
+                  </p>
+                </div>
+
+                <!-- Nombres -->
+                <div>
+                  <label for="b-nombres" class="text-xs font-semibold text-slate-600">
+                    Nombres <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-nombres"
+                    :value="formBasica.nombres"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="MAYÚSCULAS, sin números ni tildes"
+                    :class="claseBasica('nombres')"
+                    @input="alBasicaNombres"
+                  />
+                  <p v-if="errorBasica('nombres')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('nombres') }}
+                  </p>
+                </div>
+
+                <!-- Apellidos -->
+                <div>
+                  <label for="b-apellidos" class="text-xs font-semibold text-slate-600">
+                    Apellidos <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-apellidos"
+                    :value="formBasica.apellidos"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="MAYÚSCULAS, sin números ni tildes"
+                    :class="claseBasica('apellidos')"
+                    @input="alBasicaApellidos"
+                  />
+                  <p v-if="errorBasica('apellidos')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('apellidos') }}
+                  </p>
+                </div>
+
+                <!-- Fecha de nacimiento -->
+                <div>
+                  <label for="b-fecha" class="text-xs font-semibold text-slate-600">
+                    Fecha de nacimiento <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-fecha"
+                    v-model="formBasica.fechaNacimiento"
+                    type="date"
+                    :max="hoyISO"
+                    :class="claseBasica('fechaNacimiento')"
+                    @input="limpiarErrorBasica('fechaNacimiento')"
+                  />
+                  <p v-if="formBasica.fechaNacimiento" class="mt-1 text-xs text-slate-400">
+                    Fecha elegida: {{ fechaCorta(formBasica.fechaNacimiento) }} (dd/mm/yyyy)
+                  </p>
+                  <p v-if="errorBasica('fechaNacimiento')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('fechaNacimiento') }}
+                  </p>
+                </div>
+
+                <!-- Sexo -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    Sexo <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SEXO_BASICA"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.sexo, opcion, 'sexo')"
+                    >
+                      <input
+                        v-model="formBasica.sexo"
+                        type="radio"
+                        name="b-sexo"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('sexo')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('sexo')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('sexo') }}
+                  </p>
+                </div>
+
+                <!-- Nacionalidad -->
+                <div>
+                  <label for="b-nacionalidad" class="text-xs font-semibold text-slate-600">
+                    Nacionalidad <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-nacionalidad"
+                    :value="formBasica.nacionalidad"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Ej.: SALVADOREÑA"
+                    :class="claseBasica('nacionalidad')"
+                    @input="alBasicaNacionalidad"
+                  />
+                  <p v-if="errorBasica('nacionalidad')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('nacionalidad') }}
+                  </p>
+                </div>
+
+                <!-- ¿Es naturalizado? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Es naturalizado? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.naturalizado, opcion, 'naturalizado')"
+                    >
+                      <input
+                        v-model="formBasica.naturalizado"
+                        type="radio"
+                        name="b-naturalizado"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('naturalizado')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('naturalizado')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('naturalizado') }}
+                  </p>
+                </div>
+
+                <!-- Estado familiar -->
+                <div>
+                  <label for="b-estado-familiar" class="text-xs font-semibold text-slate-600">
+                    Estado familiar <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-estado-familiar"
+                    v-model="formBasica.estadoFamiliar"
+                    :class="claseBasica('estadoFamiliar')"
+                    @change="limpiarErrorBasica('estadoFamiliar')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_ESTADO_FAMILIAR" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('estadoFamiliar')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('estadoFamiliar') }}
+                  </p>
+                </div>
+
+                <!-- Etnia (desactivado: N/A) -->
+                <div>
+                  <label for="b-etnia" class="text-xs font-semibold text-slate-600">
+                    Etnia <span class="font-normal text-slate-400">(N/A)</span>
+                  </label>
+                  <input
+                    id="b-etnia"
+                    value="N/A"
+                    type="text"
+                    disabled
+                    title="No modificable: queda en blanco al guardar"
+                    :class="claseBasica('etnia')"
+                  />
+                </div>
+
+                <!-- ¿Tiene alguna discapacidad? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Tiene alguna discapacidad? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.discapacidad, opcion, 'discapacidad')"
+                    >
+                      <input
+                        v-model="formBasica.discapacidad"
+                        type="radio"
+                        name="b-discapacidad"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="alBasicaDiscapacidad"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('discapacidad')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('discapacidad') }}
+                  </p>
+                </div>
+
+                <!-- Especifique la discapacidad (solo si Sí) -->
+                <div v-if="formBasica.discapacidad === 'Sí'">
+                  <label for="b-discapacidad-cual" class="text-xs font-semibold text-slate-600">
+                    Especifique la discapacidad <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-discapacidad-cual"
+                    :value="formBasica.discapacidadCual"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe cuál"
+                    :class="claseBasica('discapacidadCual')"
+                    @input="alBasicaDiscapacidadCual"
+                  />
+                  <p v-if="errorBasica('discapacidadCual')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('discapacidadCual') }}
+                  </p>
+                </div>
+
+                <!-- ¿Embarazo? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Embarazo? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.embarazo, opcion, 'embarazo')"
+                    >
+                      <input
+                        v-model="formBasica.embarazo"
+                        type="radio"
+                        name="b-embarazo"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="alBasicaEmbarazo"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('embarazo')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('embarazo') }}
+                  </p>
+                </div>
+
+                <!-- Fecha de parto (solo si embarazo = Sí) -->
+                <div v-if="formBasica.embarazo === 'Sí'">
+                  <label for="b-fecha-parto" class="text-xs font-semibold text-slate-600">
+                    Fecha de parto <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-fecha-parto"
+                    v-model="formBasica.fechaParto"
+                    type="date"
+                    :max="hoyISO"
+                    :class="claseBasica('fechaParto')"
+                    @input="limpiarErrorBasica('fechaParto')"
+                  />
+                  <p v-if="formBasica.fechaParto" class="mt-1 text-xs text-slate-400">
+                    Fecha elegida: {{ fechaCorta(formBasica.fechaParto) }} (dd/mm/yyyy)
+                  </p>
+                  <p v-if="errorBasica('fechaParto')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('fechaParto') }}
+                  </p>
+                </div>
+
+                <!-- Dirección (los mismos inputs que primera infancia) -->
+                <p class="text-xs font-bold uppercase tracking-wide text-slate-400 sm:col-span-2">
+                  Dirección
+                </p>
+
+                <div>
+                  <label for="b-departamento" class="text-xs font-semibold text-slate-600">
+                    Departamento
+                  </label>
+                  <input
+                    id="b-departamento"
+                    :value="formBasica.departamento"
+                    type="text"
+                    disabled
+                    title="No modificable"
+                    :class="claseBasica('departamento')"
+                  />
+                </div>
+
+                <div>
+                  <label for="b-distrito" class="text-xs font-semibold text-slate-600">
+                    Distrito <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-distrito"
+                    v-model="formBasica.distrito"
+                    :class="claseBasica('distrito')"
+                    @change="alBasicaDistrito"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in DISTRITOS" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('distrito')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('distrito') }}
+                  </p>
+                </div>
+
+                <div>
+                  <label for="b-canton" class="text-xs font-semibold text-slate-600">
+                    Cantón <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-canton"
+                    v-model="formBasica.canton"
+                    :class="claseBasica('canton')"
+                    @change="alBasicaCanton"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in CANTONES" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('canton')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('canton') }}
+                  </p>
+                </div>
+
+                <div>
+                  <label for="b-caserio" class="text-xs font-semibold text-slate-600">
+                    Caserío <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-caserio"
+                    v-model="formBasica.caserio"
+                    :class="claseBasica('caserio')"
+                    @change="alBasicaCaserio"
+                  >
+                    <option v-for="opcion in OPCIONES_CASERIO" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                </div>
+
+                <div v-if="formBasica.caserio === OTRO_CASERIO">
+                  <label for="b-caserio-otro" class="text-xs font-semibold text-slate-600">
+                    Especifique el caserío <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-caserio-otro"
+                    :value="formBasica.caserioOtro"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe el nombre del caserío"
+                    :class="claseBasica('caserioOtro')"
+                    @input="alBasicaCaserioOtro"
+                  />
+                  <p v-if="errorBasica('caserioOtro')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('caserioOtro') }}
+                  </p>
+                </div>
+
+                <!-- Tipo de calle -->
+                <div>
+                  <label for="b-tipo-calle" class="text-xs font-semibold text-slate-600">
+                    Tipo de calle <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-tipo-calle"
+                    v-model="formBasica.tipoCalle"
+                    :class="claseBasica('tipoCalle')"
+                    @change="limpiarErrorBasica('tipoCalle')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_TIPO_CALLE" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('tipoCalle')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('tipoCalle') }}
+                  </p>
+                </div>
+
+                <!-- Medio de transporte -->
+                <div>
+                  <label for="b-transporte" class="text-xs font-semibold text-slate-600">
+                    Medio de transporte <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-transporte"
+                    v-model="formBasica.medioTransporte"
+                    :class="claseBasica('medioTransporte')"
+                    @change="alBasicaTransporte"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_TRANSPORTE" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('medioTransporte')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('medioTransporte') }}
+                  </p>
+                </div>
+
+                <!-- Transporte "Otro (especifique)" -->
+                <div v-if="formBasica.medioTransporte === OTRO_TRANSPORTE">
+                  <label for="b-transporte-otro" class="text-xs font-semibold text-slate-600">
+                    Especifique el transporte <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-transporte-otro"
+                    :value="formBasica.transporteOtro"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe el medio de transporte"
+                    :class="claseBasica('transporteOtro')"
+                    @input="alBasicaTransporteOtro"
+                  />
+                  <p v-if="errorBasica('transporteOtro')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('transporteOtro') }}
+                  </p>
+                </div>
+
+                <!-- Factores de riesgo en camino (o) -->
+                <div>
+                  <label for="b-factores" class="text-xs font-semibold text-slate-600">
+                    Factores de riesgo en camino
+                    <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <input
+                    id="b-factores"
+                    :value="formBasica.factoresRiesgo"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Opcional: ríos, cruces peligrosos, etc."
+                    :class="claseBasica('factoresRiesgo')"
+                    @input="alBasicaFactores"
+                  />
+                </div>
+
+                <!-- ¿Trabaja el estudiante? (o) -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Trabaja el estudiante? <span class="font-normal text-slate-400">(o)</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.trabaja, opcion, 'trabaja')"
+                    >
+                      <input
+                        v-model="formBasica.trabaja"
+                        type="radio"
+                        name="b-trabaja"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('trabaja')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Dependencia económica -->
+                <div>
+                  <label for="b-dependencia" class="text-xs font-semibold text-slate-600">
+                    Dependencia económica del estudiante <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-dependencia"
+                    v-model="formBasica.dependenciaEconomica"
+                    :class="claseBasica('dependenciaEconomica')"
+                    @change="alBasicaDependencia"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                                        <option v-for="opcion in OPCIONES_DEPENDENCIA" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('dependenciaEconomica')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('dependenciaEconomica') }}
+                  </p>
+                </div>
+
+                <!-- Dependencia "Otros (especifique)" -->
+                <div v-if="formBasica.dependenciaEconomica === OTROS_DEPENDENCIA">
+                  <label for="b-dependencia-otro" class="text-xs font-semibold text-slate-600">
+                    Especifique la dependencia <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-dependencia-otro"
+                    :value="formBasica.dependenciaOtro"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe quién mantiene al estudiante"
+                    :class="claseBasica('dependenciaOtro')"
+                    @input="alBasicaDependenciaOtro"
+                  />
+                  <p v-if="errorBasica('dependenciaOtro')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('dependenciaOtro') }}
+                  </p>
+                </div>
+
+                <!-- Ocupación de la estudiante (o) -->
+                <div>
+                  <label for="b-ocupacion" class="text-xs font-semibold text-slate-600">
+                    Ocupación de o la estudiante
+                    <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <select
+                    id="b-ocupacion"
+                    v-model="formBasica.ocupacion"
+                    :class="claseBasica('ocupacion')"
+                    @change="alBasicaOcupacion"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option
+                      v-for="opcion in OPCIONES_OCUPACION_ESTUDIANTE"
+                      :key="opcion"
+                      :value="opcion"
+                    >
+                      {{ opcion }}
+                    </option>
+                  </select>
+                </div>
+
+                <!-- Ocupación "Otro (especifique)" -->
+                <div v-if="formBasica.ocupacion === OTRO_OCUPACION">
+                  <label for="b-ocupacion-otro" class="text-xs font-semibold text-slate-600">
+                    Especifique la ocupación <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-ocupacion-otro"
+                    :value="formBasica.ocupacionOtro"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe la ocupación"
+                    :class="claseBasica('ocupacionOtro')"
+                    @input="alBasicaOcupacionOtro"
+                  />
+                  <p v-if="errorBasica('ocupacionOtro')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('ocupacionOtro') }}
+                  </p>
+                </div>
+
+                <!-- Tipo de sangre (o) -->
+                <div>
+                  <label for="b-tipo-sangre" class="text-xs font-semibold text-slate-600">
+                    Tipo de sangre <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <select
+                    id="b-tipo-sangre"
+                    v-model="formBasica.tipoSangre"
+                    :class="claseBasica('tipoSangre')"
+                    @change="limpiarErrorBasica('tipoSangre')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_SANGRE" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                </div>
+
+                <!-- Propiedad de la vivienda -->
+                <div>
+                  <label for="b-propiedad" class="text-xs font-semibold text-slate-600">
+                    Propiedad de la vivienda <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-propiedad"
+                    v-model="formBasica.propiedadVivienda"
+                    :class="claseBasica('propiedadVivienda')"
+                    @change="alBasicaPropiedad"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_PROPIEDAD" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('propiedadVivienda')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('propiedadVivienda') }}
+                  </p>
+                </div>
+
+                <!-- Propiedad "Otra (especifique)" -->
+                <div v-if="formBasica.propiedadVivienda === OTRA_PROPIEDAD">
+                  <label for="b-propiedad-otra" class="text-xs font-semibold text-slate-600">
+                    Especifique la propiedad <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-propiedad-otra"
+                    :value="formBasica.propiedadOtra"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe la condición de la vivienda"
+                    :class="claseBasica('propiedadOtra')"
+                    @input="alBasicaPropiedadOtra"
+                  />
+                  <p v-if="errorBasica('propiedadOtra')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('propiedadOtra') }}
+                  </p>
+                </div>
+
+                <!-- Servicios básicos (check, al menos uno) -->
+                <fieldset class="rounded-lg border border-slate-200 p-3 sm:col-span-2">
+                  <legend class="px-1 text-xs font-semibold text-slate-600">
+                    Servicios básicos <span class="text-red-500">*</span>
+                    <span class="font-normal text-slate-400">(marca todos los que tienen)</span>
+                  </legend>
+                  <div class="grid gap-2 sm:grid-cols-3">
+                    <label
+                      v-for="servicio in SERVICIOS_BASICOS_LISTA"
+                      :key="servicio"
+                      :class="cuadroBasica(formBasica.serviciosBasicos.includes(servicio), 'serviciosBasicos')"
+                    >
+                      <input
+                        v-model="formBasica.serviciosBasicos"
+                        type="checkbox"
+                        name="b-servicios"
+                        :value="servicio"
+                        class="mt-0.5 h-4 w-4 accent-primario"
+                        @change="alBasicaServicios('serviciosBasicos')"
+                      />
+                      <span>{{ servicio }}</span>
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('serviciosBasicos')" class="mt-2 text-xs text-red-600">
+                    {{ errorBasica('serviciosBasicos') }}
+                  </p>
+                </fieldset>
+
+                <!-- ¿Acceso a internet? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Acceso a internet? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.accesoInternet, opcion, 'accesoInternet')"
+                    >
+                      <input
+                        v-model="formBasica.accesoInternet"
+                        type="radio"
+                        name="b-internet"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('accesoInternet')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('accesoInternet')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('accesoInternet') }}
+                  </p>
+                </div>
+
+                <!-- ¿Recibe remesas? (o) -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Recibe remesas? <span class="font-normal text-slate-400">(o)</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.remesas, opcion, 'remesas')"
+                    >
+                      <input
+                        v-model="formBasica.remesas"
+                        type="radio"
+                        name="b-remesas"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('remesas')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                </div>
+
+                <!-- ¿El estudiante tiene hijos? (o) -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿El estudiante tiene hijos? <span class="font-normal text-slate-400">(o)</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(formBasica.hijos, opcion, 'hijos')"
+                    >
+                      <input
+                        v-model="formBasica.hijos"
+                        type="radio"
+                        name="b-hijos"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('hijos')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                </div>
+
+                <!-- Emigrados del grupo familiar (o, número positivo de cero en adelante) -->
+                <div>
+                  <label for="b-emigrados" class="text-xs font-semibold text-slate-600">
+                    Personas del grupo familiar que han emigrado
+                    <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <input
+                    id="b-emigrados"
+                    :value="formBasica.emigrados"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    placeholder="Solo números, 0 o más"
+                    :class="claseBasica('emigrados')"
+                    @input="alBasicaEmigrados"
+                  />
+                </div>
+
+                <!-- Grado que cursará (define el id de clase en Firebase) -->
+                <div>
+                  <label for="b-grado" class="text-xs font-semibold text-slate-600">
+                    Grado <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-grado"
+                    v-model="formBasica.grado"
+                    :class="claseBasica('grado')"
+                    @change="limpiarErrorBasica('grado')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="g in GRADOS_BASICA" :key="g.id" :value="g.nombre">
+                      {{ g.nombre }}
+                    </option>
+                  </select>
+                  <p class="mt-1 text-xs text-slate-400">
+                    Define el id de clase con el que se guarda el estudiante en Firebase.
+                  </p>
+                  <p v-if="errorBasica('grado')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('grado') }}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <!-- ══ Parte 3: datos del responsable ══ -->
+            <div v-else-if="pasoBasicaActual.id === 'basica-responsable'" class="space-y-5">
+              <p class="text-xs text-slate-500">
+                Los campos marcados con <span class="font-bold text-red-500">*</span> son
+                requeridos: no se puede continuar sin ellos.
+              </p>
+
+              <div class="grid gap-x-6 gap-y-5 sm:grid-cols-2">
+                <!-- Identificación -->
+                <div>
+                  <label for="b-res-identificacion" class="text-xs font-semibold text-slate-600">
+                    Identificación <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-res-identificacion"
+                    :value="respBasica.identificacion"
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="off"
+                    placeholder="Solo números, cualquier formato, se permiten guiones"
+                    :class="claseBasica('identificacion')"
+                    @input="alBasicaIdentificacion"
+                  />
+                  <p v-if="errorBasica('identificacion')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('identificacion') }}
+                  </p>
+                </div>
+
+                <!-- ¿Es familiar? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Es familiar? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(respBasica.esFamiliar, opcion, 'esFamiliar')"
+                    >
+                      <input
+                        v-model="respBasica.esFamiliar"
+                        type="radio"
+                        name="b-res-familiar"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="alBasicaFamiliar"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('esFamiliar')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('esFamiliar') }}
+                  </p>
+                </div>
+
+                <!-- Nombre completo -->
+                <div>
+                  <label for="b-res-nombre" class="text-xs font-semibold text-slate-600">
+                    Nombre completo <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-res-nombre"
+                    :value="respBasica.nombre"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="MAYÚSCULAS, sin números ni tildes"
+                    :class="claseBasica('nombre')"
+                    @input="alBasicaNombreResponsable"
+                  />
+                  <p v-if="errorBasica('nombre')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('nombre') }}
+                  </p>
+                </div>
+
+                <!-- Fecha de nacimiento -->
+                <div>
+                  <label for="b-res-fecha" class="text-xs font-semibold text-slate-600">
+                    Fecha de nacimiento <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-res-fecha"
+                    v-model="respBasica.fechaNacimiento"
+                    type="date"
+                    :max="hoyISO"
+                    :class="claseBasica('fechaNacimiento')"
+                    @input="limpiarErrorBasica('fechaNacimiento')"
+                  />
+                  <p v-if="respBasica.fechaNacimiento" class="mt-1 text-xs text-slate-400">
+                    Fecha elegida: {{ fechaCorta(respBasica.fechaNacimiento) }} (dd/mm/yyyy)
+                  </p>
+                  <p v-if="errorBasica('fechaNacimiento')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('fechaNacimiento') }}
+                  </p>
+                </div>
+
+                <!-- Nacionalidad (Centroamérica) -->
+                <div>
+                  <label for="b-res-nacionalidad" class="text-xs font-semibold text-slate-600">
+                    Nacionalidad <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-res-nacionalidad"
+                    v-model="respBasica.nacionalidad"
+                    :class="claseBasica('nacionalidad')"
+                    @change="limpiarErrorBasica('nacionalidad')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in NACIONALIDADES_CA" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('nacionalidad')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('nacionalidad') }}
+                  </p>
+                </div>
+
+                <!-- ¿Es naturalizado? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Es naturalizado? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(respBasica.naturalizado, opcion, 'naturalizado')"
+                    >
+                      <input
+                        v-model="respBasica.naturalizado"
+                        type="radio"
+                        name="b-res-naturalizado"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('naturalizado')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('naturalizado')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('naturalizado') }}
+                  </p>
+                </div>
+
+                <!-- Departamento de nacimiento -->
+                <div>
+                  <label
+                    for="b-res-departamento"
+                    class="text-xs font-semibold text-slate-600"
+                  >
+                    Departamento de nacimiento <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-res-departamento"
+                    v-model="respBasica.departamentoNacimiento"
+                    :class="claseBasica('departamentoNacimiento')"
+                    @change="alBasicaDepartamentoNacimiento"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in DEPARTAMENTOS_SV" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('departamentoNacimiento')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('departamentoNacimiento') }}
+                  </p>
+                </div>
+
+                <!-- Distrito de nacimiento -->
+                <div>
+                  <label for="b-res-distrito" class="text-xs font-semibold text-slate-600">
+                    Distrito de nacimiento <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-res-distrito"
+                    v-model="respBasica.distritoNacimiento"
+                    :class="claseBasica('distritoNacimiento')"
+                    @change="limpiarErrorBasica('distritoNacimiento')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in distritosNacimiento" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('distritoNacimiento')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('distritoNacimiento') }}
+                  </p>
+                </div>
+
+                <!-- Sexo -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    Sexo <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SEXO_BASICA"
+                      :key="opcion"
+                      :class="radioBasica(respBasica.sexo, opcion, 'sexoResp')"
+                    >
+                      <input
+                        v-model="respBasica.sexo"
+                        type="radio"
+                        name="b-res-sexo"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('sexoResp')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('sexoResp')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('sexoResp') }}
+                  </p>
+                </div>
+
+                <!-- Estado familiar -->
+                <div>
+                  <label for="b-res-estado" class="text-xs font-semibold text-slate-600">
+                    Estado familiar <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-res-estado"
+                    v-model="respBasica.estadoFamiliar"
+                    :class="claseBasica('estadoFamiliarResp')"
+                    @change="limpiarErrorBasica('estadoFamiliarResp')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_ESTADO_FAMILIAR" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('estadoFamiliarResp')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('estadoFamiliarResp') }}
+                  </p>
+                </div>
+
+                <!-- ¿Tiene alguna discapacidad? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Tiene alguna discapacidad? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(respBasica.discapacidad, opcion, 'discapacidadResp')"
+                    >
+                      <input
+                        v-model="respBasica.discapacidad"
+                        type="radio"
+                        name="b-res-discapacidad"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="limpiarErrorBasica('discapacidadResp')"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('discapacidadResp')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('discapacidadResp') }}
+                  </p>
+                </div>
+
+                <!-- ¿Embarazo? -->
+                <div>
+                  <span class="text-xs font-semibold text-slate-600">
+                    ¿Embarazo? <span class="text-red-500">*</span>
+                  </span>
+                  <div class="mt-1 flex flex-wrap gap-2">
+                    <label
+                      v-for="opcion in SI_NO"
+                      :key="opcion"
+                      :class="radioBasica(respBasica.embarazo, opcion, 'embarazoResp')"
+                    >
+                      <input
+                        v-model="respBasica.embarazo"
+                        type="radio"
+                        name="b-res-embarazo"
+                        :value="opcion"
+                        class="h-4 w-4 accent-primario"
+                        @change="alBasicaEmbarazoResponsable"
+                      />
+                      {{ opcion }}
+                    </label>
+                  </div>
+                  <p v-if="errorBasica('embarazoResp')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('embarazoResp') }}
+                  </p>
+                </div>
+
+                <!-- Fecha de parto (solo si embarazo = Sí) -->
+                <div v-if="respBasica.embarazo === 'Sí'">
+                  <label for="b-res-fecha-parto" class="text-xs font-semibold text-slate-600">
+                    Fecha de parto <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-res-fecha-parto"
+                    v-model="respBasica.fechaParto"
+                    type="date"
+                    :max="hoyISO"
+                    :class="claseBasica('fechaPartoResp')"
+                    @input="limpiarErrorBasica('fechaPartoResp')"
+                  />
+                  <p v-if="respBasica.fechaParto" class="mt-1 text-xs text-slate-400">
+                    Fecha elegida: {{ fechaCorta(respBasica.fechaParto) }} (dd/mm/yyyy)
+                  </p>
+                  <p v-if="errorBasica('fechaPartoResp')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('fechaPartoResp') }}
+                  </p>
+                </div>
+
+                <!-- Teléfono: prefijo + número (o) -->
+                <div>
+                  <label for="b-res-pais-telefono" class="text-xs font-semibold text-slate-600">
+                    Código de teléfono <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <select
+                    id="b-res-pais-telefono"
+                    v-model="respBasica.paisTelefono"
+                    :class="claseBasica('paisTelefono')"
+                    @change="alBasicaPaisTelefono"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="nombrePais in NOMBRES_PAISES" :key="nombrePais" :value="nombrePais">
+                      {{ codigoTelefono(nombrePais) }} — {{ nombrePais }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('paisTelefono')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('paisTelefono') }}
+                  </p>
+                </div>
+
+                <div>
+                  <label for="b-res-telefono" class="text-xs font-semibold text-slate-600">
+                    Teléfono <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <input
+                    id="b-res-telefono"
+                    :value="respBasica.telefono"
+                    type="text"
+                    inputmode="tel"
+                    autocomplete="off"
+                    placeholder="Número según el país elegido"
+                    :class="claseBasica('telefono')"
+                    @input="alBasicaTelefono"
+                  />
+                  <p v-if="errorBasica('telefono')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('telefono') }}
+                  </p>
+                </div>
+
+                <!-- Profesión (o) -->
+                <div>
+                  <label for="b-res-profesion" class="text-xs font-semibold text-slate-600">
+                    Profesión <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <select
+                    id="b-res-profesion"
+                    v-model="respBasica.profesion"
+                    :class="claseBasica('profesion')"
+                    @change="alBasicaProfesion"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_PROFESION" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                </div>
+
+                <!-- Profesión "Otro (especifique)" -->
+                <div v-if="respBasica.profesion === OTRO_OCUPACION">
+                  <label for="b-res-profesion-otra" class="text-xs font-semibold text-slate-600">
+                    Especifique la profesión <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-res-profesion-otra"
+                    :value="respBasica.profesionOtra"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe la profesión"
+                    :class="claseBasica('profesionOtra')"
+                    @input="alBasicaProfesionOtra"
+                  />
+                  <p v-if="errorBasica('profesionOtra')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('profesionOtra') }}
+                  </p>
+                </div>
+
+                <!-- Escolaridad (o) -->
+                <div>
+                  <label for="b-res-escolaridad" class="text-xs font-semibold text-slate-600">
+                    Escolaridad <span class="font-normal text-slate-400">(o)</span>
+                  </label>
+                  <select
+                    id="b-res-escolaridad"
+                    v-model="respBasica.escolaridad"
+                    :class="claseBasica('escolaridad')"
+                    @change="limpiarErrorBasica('escolaridad')"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in ESCOLARIDADES" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                </div>
+
+                <!-- Ocupación -->
+                <div>
+                  <label for="b-res-ocupacion" class="text-xs font-semibold text-slate-600">
+                    Ocupación <span class="text-red-500">*</span>
+                  </label>
+                  <select
+                    id="b-res-ocupacion"
+                    v-model="respBasica.ocupacion"
+                    :class="claseBasica('ocupacionResp')"
+                    @change="alBasicaOcupacionResponsable"
+                  >
+                    <option value="" disabled>Seleccione…</option>
+                    <option v-for="opcion in OPCIONES_OCUPACION" :key="opcion" :value="opcion">
+                      {{ opcion }}
+                    </option>
+                  </select>
+                  <p v-if="errorBasica('ocupacionResp')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('ocupacionResp') }}
+                  </p>
+                </div>
+
+                <!-- Ocupación "Otro (especifique)" -->
+                <div v-if="respBasica.ocupacion === OTRO_OCUPACION">
+                  <label for="b-res-ocupacion-otro" class="text-xs font-semibold text-slate-600">
+                    Especifique la ocupación <span class="text-red-500">*</span>
+                  </label>
+                  <input
+                    id="b-res-ocupacion-otro"
+                    :value="respBasica.ocupacionOtro"
+                    type="text"
+                    autocomplete="off"
+                    placeholder="Escribe la ocupación"
+                    :class="claseBasica('ocupacionOtroResp')"
+                    @input="alBasicaOcupacionOtroResponsable"
+                  />
+                  <p v-if="errorBasica('ocupacionOtroResp')" class="mt-1 text-xs text-red-600">
+                    {{ errorBasica('ocupacionOtroResp') }}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Pie: Anterior / Siguiente (o Guardar en la última parte) -->
+          <div class="flex items-center justify-between gap-3 border-t border-slate-100 px-4 py-3">
+            <button
+              v-if="pasoBasica > 0"
+              type="button"
+              class="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+              @click="anteriorBasica"
+            >
+              <span class="block" v-html="iconoIzquierda"></span>
+              Anterior
+            </button>
+            <span v-else></span>
+
+            <button
+              v-if="!esUltimoPasoBasica"
+              type="button"
+              class="flex items-center gap-1.5 rounded-lg bg-primario px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primario-oscuro"
+              @click="siguienteBasica"
+            >
+              Siguiente
+              <span class="block" v-html="iconoDerecha"></span>
+            </button>
+            <button
+              v-else
+              type="button"
+              class="flex items-center gap-1.5 rounded-lg bg-primario px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-primario-oscuro"
+              @click="guardarBasica"
+            >
+              <span class="block" v-html="iconoGuardar"></span>
+              Guardar
+            </button>
+          </div>
+        </div>
+      </template>
     </template>
   </section>
 

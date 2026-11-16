@@ -9,7 +9,7 @@ const URL_SHEET = (import.meta.env.VITE_SHEET_DOCENTES_URL ?? '').trim()
 
 export const sheetConfigurado = URL_SHEET.length > 0
 
-export interface FilaDocente extends DocenteCompleto {}
+export type FilaDocente = DocenteCompleto;
 
 interface RespuestaSheet {
   ok?: boolean

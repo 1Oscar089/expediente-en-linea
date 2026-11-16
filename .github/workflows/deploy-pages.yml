@@ -81,6 +81,10 @@ jobs:
         with:
           path: dist # lo que se publica es SOLO la carpeta dist
 
+      - name: Build
+        run: npm run build
+        env:
+          VITE_SHEET_ESTUDIANTES_URL: ${{ secrets.VITE_SHEET_ESTUDIANTES_URL }}
   deploy:
     needs: build # espera a que el job "build" termine bien
     runs-on: ubuntu-latest
@@ -91,3 +95,4 @@ jobs:
       - name: Publicar en GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+    

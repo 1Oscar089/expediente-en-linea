@@ -1,29 +1,44 @@
 <script setup lang="ts">
 // ─────────────────────────────────────────────────────────────
-// ESTUDIANTES › ACTUALIZAR. Flujo ligero para EDITAR una matrícula que ya
-// existe (la matrícula nueva vive en MatricularView):
-//   1. ¿Nivel? (primera infancia / educación básica)
-//   2. ¿Qué parte quieres modificar? (solo se carga y se llama para ESA parte)
-//   3. ¿Qué estudiante? Buscador en tiempo real sobre el Sheet: empieza a
-//      buscar a partir de 3 letras y al hacer click en un resultado se lee
-//      SU fila y se muestra la parte con TODOS sus campos editables.
-//   4. GUARDAR: el Sheet recibe SOLO las columnas que cambiaron y Firebase
-//      recalcula sus 8 datos desde la fila completa. El id del documento
-//      sigue a la regla de la matrícula (grado + nombre): si cambia el
-//      nombre o el grado, el documento se recrea con el id nuevo y se borra
-//      el viejo — el id no importa, los datos sí.
-// El borrador local (regla del proyecto) protege lo escrito mientras se
-// edita: recarga, cancelación y caché por usuario.
-// Reglas de acceso: la búsqueda vive SOLO en la hoja del nivel elegido
-// (primera infancia → "primera infancia"; básica → "basica") y el GRADO
-// ("Grado que cursa") solo lo pueden cambiar admin y director — para un
-// docente llega bloqueado y el guardado ignora cualquier cambio suyo.
-// Al GUARDAR BIEN se borra la copia local del borrador y el flujo vuelve
-// al PASO 1 (elegir nivel) con todo limpio: nada queda "sin guardar".
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+// ESTUDIANTES › ACTUALIZAR — flujo NUEVO (regla del usuario):
+//   1. PRIMERO la búsqueda: buscador en tiempo real desde 3 letras sobre
+//      LAS DOS hojas del libro (primera infancia y basica) a la vez.
+//   2. El estudiante elegido se GUARDA EN LOCAL (localStorage por usuario)
+//      y se ANALIZA SU GRADO: de Primero hacia abajo es Primera Infancia y
+//      de Segundo en adelante es Educación Básica (el MISMO corte que usa
+//      Matricular al repartir hojas). Con la etapa detectada se muestran
+//      LAS PARTES a modificar. Si el grado y la hoja donde vive la fila
+//      contaran historias distintas, manda la hoja (con aviso), porque las
+//      columnas a escribir son las de DONDE vive la fila.
+//   3. Al GUARDAR una parte se vuelve a la lista de partes con el MISMO
+//      estudiante seleccionado (la fila actualizada queda en el local).
+//      Para usar otro estudiante está el botón CAMBIAR ESTUDIANTE.
+//   4. Al elegir OTRA SECCIÓN o SUBSECCIÓN del menú la vista se desmonta
+//      (App.vue la pinta con v-if) y la copia local del estudiante SE
+//      BORRA: la próxima vez toca hacer la búsqueda de nuevo.
+// Guardado: el Sheet recibe SOLO las columnas que cambiaron y Firebase
+// recalcula sus 8 datos desde la fila completa; el id del documento sigue a
+// la regla de la matrícula (grado + nombre): si cambia el nombre o el
+// grado, el documento se recrea con el id nuevo y se borra el viejo — el id
+// no importa, los datos sí.
+// El borrador local (regla del proyecto) sigue protegiendo lo escrito
+// mientras se edita una parte: recarga, cancelación y caché por usuario.
+// Reglas de acceso: el GRADO ("Grado que cursa") solo lo pueden cambiar
+// admin y director — para un docente llega bloqueado y el guardado ignora
+// cualquier cambio suyo.
+// ─────────────────────────────────────────────────────────────
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import ModalConfirmacion from '@/components/ui/ModalConfirmacion.vue'
 import { usarBorrador } from '@/lib/borrador'
+import {
+  borrarEstudianteLocal,
+  guardarEstudianteLocal,
+  leerEstudianteLocal,
+  nivelDeGrado,
+  nivelDeHoja,
+  nombreNivel,
+} from '@/lib/estudianteActualizar'
 import { aIsoFecha, fechaCorta } from '@/lib/fechas'
 import { cantonesDe, SIN_CANTON } from '@/lib/geoSV'
 import {
@@ -39,7 +54,6 @@ import {
   datosFirebaseDeFila,
   esVisible,
   formatoTelefono,
-  hojaDeNivel,
   opcionesDeCampo,
   parteDe,
   textoDe,
@@ -51,12 +65,15 @@ import {
 } from '@/lib/estudiantePartes'
 import {
   actualizarEstudiante as actualizarEnFirebase,
+  idDeGrado,
   mensajeError,
   nombreCompleto,
 } from '@/lib/estudiantes'
 import {
   actualizarEstudiante as actualizarEnSheet,
   buscarEstudiantes,
+  HOJA_BASICA,
+  HOJA_PRIMERA_INFANCIA,
   leerEstudiante,
   sheetEstudiantesConfigurado,
   type CoincidenciaFila,
@@ -71,46 +88,49 @@ const auth = useAuthStore()
    lo ve bloqueado; al guardar se le descarta cualquier cambio de grado. */
 const puedeCambiarGrado = computed(() => auth.rolEfectivo === 'admin' || auth.rolEfectivo === 'director')
 
-/* ── Paso 1: el nivel ── */
-const NIVELES: { id: NivelEstudiante; nombre: string; descripcion: string }[] = [
-  {
-    id: 'primera-infancia',
-    nombre: 'Primera Infancia',
-    descripcion: 'Matrículas guardadas en la hoja "primera infancia" del libro de estudiantes.',
-  },
-  {
-    id: 'educacion-basica',
-    nombre: 'Educación Básica',
-    descripcion: 'Matrículas guardadas en la hoja "basica" del libro de estudiantes.',
-  },
-]
+/* Correo de la sesión: la copia local del estudiante vive POR USUARIO */
+const correoSesion = computed(() => auth.perfil?.correo ?? '')
 
-const nivel = ref<NivelEstudiante | null>(null)
-const parte = ref<Parte | null>(null)
-
-/* ── Paso 3: el buscador ── */
-const LETRAS_MINIMAS = 3
-const letras = ref('')
-const buscando = ref(false)
-const coincidencias = ref<CoincidenciaFila[]>([])
-const errorBusqueda = ref('')
-
-/* ── Paso 4: el estudiante elegido y su formulario ── */
+/* ── El estudiante buscado y GUARDADO EN LOCAL ── */
 const elegido = ref<CoincidenciaFila | null>(null)
 const fila = ref<Record<string, string>>({})
+const nivel = ref<NivelEstudiante | null>(null)
+const parte = ref<Parte | null>(null)
 const valores = reactive<TipoValores>({})
 const errores = reactive<Record<string, string>>({})
 const hoyISO = aIsoFecha(new Date())
 
-const nivelNombre = computed(() => NIVELES.find((n) => n.id === nivel.value)?.nombre ?? '')
-const partesNivel = computed(() => (nivel.value ? [...PARTES[nivel.value]] : []))
+/* ── El análisis del GRADO (regla del usuario) ──
+   El análisis muestra la etapa que el GRADO indica; el nivel que MANDA
+   para las partes es el de la hoja donde vive la fila (no puede ser otro:
+   las columnas a leer y escribir son las de su hoja). Si el grado y la
+   hoja contaran historias distintas, la pantalla lo advierte. */
+const nivelSegunGrado = computed(() => (elegido.value ? nivelDeGrado(elegido.value.grado) : null))
+const nivelIncoherente = computed(
+  () =>
+    elegido.value !== null &&
+    nivelSegunGrado.value !== null &&
+    nivelSegunGrado.value !== nivel.value,
+)
+const gradoIdElegido = computed(() => (elegido.value ? idDeGrado(elegido.value.grado) : null))
+
+const nivelNombre = computed(() => (nivel.value ? nombreNivel(nivel.value) : ''))
+const partesNivel = computed<Parte[]>(() => (nivel.value ? [...PARTES[nivel.value]] : []))
 const camposVisibles = computed(() =>
   (parte.value?.campos ?? []).filter(
     (campo) => campo.tipo !== 'derivado-grado' && esVisible(campo, valores),
   ),
 )
 
-/* ── Navegación entre pasos ── */
+/* Texto de la barra superior según el momento del flujo */
+const textoBarra = computed(() => {
+  if (!elegido.value) return ''
+  return parte.value
+    ? `${parte.value.etiqueta} — ${parte.value.titulo} · ${elegido.value.nombre}`
+    : `${elegido.value.nombre} — elige la parte a modificar`
+})
+
+/* ── Limpiar ── */
 function limpiarFormulario(): void {
   for (const clave of Object.keys(valores)) delete valores[clave]
   for (const clave of Object.keys(errores)) delete errores[clave]
@@ -122,77 +142,151 @@ function limpiarBusqueda(): void {
   letras.value = ''
   coincidencias.value = []
   errorBusqueda.value = ''
+  hojaFallada.value = ''
   buscando.value = false
 }
 
-function elegirNivel(id: NivelEstudiante): void {
-  nivel.value = id
+/* Volver a la lista de partes SIN perder al estudiante elegido */
+function irALasPartes(): void {
   parte.value = null
-  limpiarBusqueda()
-  limpiarFormulario()
+  for (const clave of Object.keys(valores)) delete valores[clave]
+  for (const clave of Object.keys(errores)) delete errores[clave]
 }
 
-function elegirParte(elegida: Parte): void {
-  parte.value = elegida
-  limpiarBusqueda()
-  limpiarFormulario()
-}
-
-function cambiarNivel(): void {
+/* Todo limpio y SIN estudiante: vuelve a la búsqueda y BORRA el local
+   (la copia del estudiante Y la del borrador, para que al volver no
+   aparezca un "Datos sin guardar" de una edición ya abandonada) */
+function limpiarTodo(): void {
   nivel.value = null
-  parte.value = null
   limpiarBusqueda()
   limpiarFormulario()
+  irALasPartes()
+  borrarEstudianteLocal(correoSesion.value)
+  olvidarBorrador()
 }
 
-function cambiarParte(): void {
-  parte.value = null
-  limpiarBusqueda()
-  limpiarFormulario()
+/* ── La copia local del estudiante (regla del usuario: la búsqueda queda
+   guardada en local hasta cambiar de sección o de estudiante) ── */
+function guardarLocal(): void {
+  if (elegido.value && nivel.value) {
+    guardarEstudianteLocal(correoSesion.value, {
+      elegido: { ...elegido.value },
+      fila: { ...fila.value },
+      nivel: nivel.value,
+    })
+  }
 }
 
-function volverABuscar(): void {
-  limpiarFormulario()
+/* ── Elegir la parte a modificar: se carga desde la fila ya guardada en
+   local (sin releer el Sheet: instantáneo) ── */
+function elegirParte(elegida: Parte): void {
+  if (!elegido.value) return
+  parte.value = elegida
+  for (const clave of Object.keys(valores)) delete valores[clave]
+  Object.assign(valores, cargarValores(elegida, fila.value))
+  for (const clave of Object.keys(errores)) delete errores[clave]
+}
+
+/* ── CAMBIAR ESTUDIANTE: se borra del local y vuelve a la búsqueda ──
+   Con una parte abierta y datos escritos, el borrador pide confirmación
+   (aceptar borra lo escrito, incluida la copia local). */
+function hayCambiosSinGuardar(): boolean {
+  return (
+    parte.value !== null &&
+    Object.keys(cambiosDesde(parte.value, valores, fila.value)).length > 0
+  )
+}
+
+function cambiarEstudiante(): void {
+  if (hayCambiosSinGuardar()) {
+    pedirCancelarBorrador()
+    return
+  }
+  limpiarTodo()
 }
 
 /* ── Buscador en tiempo real (debounce, desde 3 letras) ── */
+const LETRAS_MINIMAS = 3
+const letras = ref('')
+const buscando = ref(false)
+const coincidencias = ref<CoincidenciaFila[]>([])
+const errorBusqueda = ref('')
+/* Si una de las DOS hojas no respondió, se avisa (los resultados de la otra
+   sí se muestran) */
+const hojaFallada = ref('')
+
 let temporizador: ReturnType<typeof setTimeout> | undefined
 watch(letras, (valor) => {
   if (temporizador) clearTimeout(temporizador)
   coincidencias.value = []
   errorBusqueda.value = ''
+  hojaFallada.value = ''
   const limpio = valor.trim()
   if (limpio.length < LETRAS_MINIMAS) return
   temporizador = setTimeout(() => void buscar(), 350)
 })
 
 async function buscar(): Promise<void> {
-  if (!nivel.value) return
+  const consulta = letras.value.trim()
+  if (consulta.length < LETRAS_MINIMAS) return
   buscando.value = true
   errorBusqueda.value = ''
+  hojaFallada.value = ''
   try {
-    coincidencias.value = await buscarEstudiantes(hojaDeNivel(nivel.value), letras.value)
-    if (coincidencias.value.length === 0) {
-      errorBusqueda.value = 'Nadie coincide con esas letras en este nivel. Prueba con otras.'
+    /* LAS DOS hojas a la vez: el nivel se deduce del GRADO del estudiante
+       elegido, así que la búsqueda no depende de un nivel elegido antes. */
+    const [pi, basica] = await Promise.allSettled([
+      buscarEstudiantes(HOJA_PRIMERA_INFANCIA, consulta),
+      buscarEstudiantes(HOJA_BASICA, consulta),
+    ])
+    if (letras.value.trim() !== consulta) return /* tarde: ya se busca otra cosa */
+    const encontradas: CoincidenciaFila[] = []
+    const hojasFalladas: string[] = []
+    let razon: unknown = null
+    if (pi.status === 'fulfilled') encontradas.push(...pi.value)
+    else {
+      hojasFalladas.push(HOJA_PRIMERA_INFANCIA)
+      if (razon === null) razon = pi.reason
     }
-  } catch (e) {
-    errorBusqueda.value = `No se pudo buscar en el Sheet: ${(e as Error).message}`
+    if (basica.status === 'fulfilled') encontradas.push(...basica.value)
+    else {
+      hojasFalladas.push(HOJA_BASICA)
+      if (razon === null) razon = basica.reason
+    }
+    encontradas.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'))
+    coincidencias.value = encontradas
+    hojaFallada.value = hojasFalladas.join(' y ')
+    if (hojasFalladas.length === 2) {
+      errorBusqueda.value = `No se pudo buscar en el Sheet: ${
+        razon instanceof Error ? razon.message : 'error desconocido'
+      }`
+    } else if (encontradas.length === 0 && hojasFalladas.length === 1) {
+      errorBusqueda.value = `Nadie coincide con esas letras, y la hoja "${hojaFallada.value}" no respondió. Prueba de nuevo.`
+    } else if (encontradas.length === 0) {
+      errorBusqueda.value = 'Nadie coincide con esas letras. Prueba con otras.'
+    }
   } finally {
     buscando.value = false
   }
 }
 
-/* ── Click en una coincidencia: leer SU fila y montar el formulario ── */
+/* ── Click en una coincidencia: leer SU fila, GUARDAR EN LOCAL y mostrar
+   las partes de su etapa ── */
 async function elegirEstudiante(coincidencia: CoincidenciaFila): Promise<void> {
-  if (!parte.value) return
   ui.iniciarCarga('Leyendo la matrícula…')
   try {
     const filaLeida = await leerEstudiante(coincidencia.hoja, coincidencia.fila)
     elegido.value = coincidencia
     fila.value = filaLeida
-    for (const clave of Object.keys(valores)) delete valores[clave]
-    Object.assign(valores, cargarValores(parte.value, filaLeida))
-    for (const clave of Object.keys(errores)) delete errores[clave]
+    /* El nivel que manda es el de la hoja donde VIVE la fila (si el grado
+       dijera otra cosa, la pantalla lo advierte). */
+    nivel.value = nivelDeHoja(coincidencia.hoja)
+    parte.value = null
+    letras.value = ''
+    coincidencias.value = []
+    errorBusqueda.value = ''
+    hojaFallada.value = ''
+    guardarLocal() /* la búsqueda queda GUARDADA EN LOCAL */
   } catch (e) {
     ui.notificar('error', `No se pudo leer la matrícula: ${(e as Error).message}`)
   } finally {
@@ -246,16 +340,19 @@ async function guardar(): Promise<void> {
       grado: filaFusionada['Grado que cursa'] ?? elegido.value.grado,
       nie: (filaFusionada['NIE'] ?? '').trim() || elegido.value.nie,
     }
+    /* El estudiante (con la fila ya actualizada) SIGUE en el local: al
+       guardar se vuelve a la lista de partes con el mismo estudiante. */
+    guardarLocal()
     ui.notificar(
       'exito',
       `Cambios guardados en el Sheet (fila ${elegido.value.fila} de "${elegido.value.hoja}") y en Firebase.`,
     )
-    /* Guardado OK: la copia local del borrador ya no hace falta (todo quedó
-       en el Sheet y en Firebase) y el flujo vuelve al PASO 1 con todo
-       limpio. Así el borrador nunca anuncia "Datos sin guardar" por algo
-       que ya está guardado. */
+    /* Guardado OK: la copia del borrador ya no hace falta (todo quedó en el
+       Sheet y en Firebase) y el flujo vuelve a LAS PARTES con el mismo
+       estudiante seleccionado. Así el borrador nunca anuncia "Datos sin
+       guardar" por algo que ya está guardado. */
     olvidarBorrador()
-    quedarseLimpio()
+    irALasPartes()
   } catch (e) {
     ui.notificar('error', `No se pudo guardar: ${mensajeError(e)}`)
   } finally {
@@ -263,20 +360,14 @@ async function guardar(): Promise<void> {
   }
 }
 
-/* ── Borrador local (regla del proyecto: toda vista que edita) ── */
+/* ── Borrador local (regla del proyecto: toda vista que edita) ──
+   Protege lo ESCRITO de una parte abierta; el estudiante elegido vive
+   aparte en su propia copia local (estudianteActualizar). */
 interface BorradorActualizar {
-  nivel: NivelEstudiante
   parteId: string
   elegido: CoincidenciaFila
   fila: Record<string, string>
   valores: TipoValores
-}
-
-function quedarseLimpio(): void {
-  nivel.value = null
-  parte.value = null
-  limpiarBusqueda()
-  limpiarFormulario()
 }
 
 const {
@@ -290,9 +381,8 @@ const {
   olvidar: olvidarBorrador,
 } = usarBorrador('actualizar', {
   capturar: (): BorradorActualizar | null => {
-    if (!nivel.value || !parte.value || !elegido.value) return null
+    if (!parte.value || !elegido.value) return null
     return {
-      nivel: nivel.value,
       parteId: parte.value.id,
       elegido: { ...elegido.value },
       fila: { ...fila.value },
@@ -300,26 +390,38 @@ const {
     }
   },
   restaurar: (datos: BorradorActualizar) => {
-    nivel.value = datos.nivel
-    parte.value = parteDe(datos.nivel, datos.parteId)
     elegido.value = datos.elegido
     fila.value = datos.fila
+    nivel.value = nivelDeHoja(datos.elegido.hoja)
+    parte.value = parteDe(nivel.value, datos.parteId)
     for (const clave of Object.keys(valores)) delete valores[clave]
     Object.assign(valores, datos.valores)
+    guardarLocal()
   },
-  limpiar: () => quedarseLimpio(),
+  limpiar: () => limpiarTodo(),
 })
 
-vigilar(() => [nivel.value, parte.value?.id ?? '', elegido.value, fila.value, valores])
-onMounted(revisarAlEntrar)
+vigilar(() => [parte.value?.id ?? '', elegido.value, fila.value, valores])
 
-function cancelarEdicion(): void {
-  if (elegido.value) {
-    pedirCancelarBorrador()
-    return
+onMounted(() => {
+  revisarAlEntrar()
+  /* Si la búsqueda quedó guardada EN LOCAL (p. ej. tras una recarga), se
+     retoma directo: estudiante elegido y sus partes, sin buscar de nuevo.
+     El borrador (si hay) decide por encima con su modal de reconfirmación. */
+  const local = leerEstudianteLocal(correoSesion.value)
+  if (local) {
+    elegido.value = local.elegido
+    fila.value = local.fila
+    nivel.value = local.nivel
   }
-  quedarseLimpio()
-}
+})
+
+/* Regla del usuario: al elegir OTRA SECCIÓN o SUBSECCIÓN del menú la vista
+   se desmonta y el estudiante del local SE BORRA: la próxima vez toca hacer
+   la búsqueda de nuevo. */
+onUnmounted(() => {
+  borrarEstudianteLocal(correoSesion.value)
+})
 
 /* ── Helpers de pantalla para los campos genéricos ── */
 function eClave(clave: string): string {
@@ -519,13 +621,14 @@ function caserioEnModoSelect(): boolean {
 
 <template>
   <section class="space-y-4">
-    <!-- ══ PASO 1 · Elegir el nivel ══ -->
-    <div v-if="!nivel" class="space-y-4">
+    <!-- ══ PASO 1 · BUSCAR al estudiante (queda guardado en local) ══ -->
+    <div v-if="!elegido" class="space-y-4">
       <header>
         <h2 class="text-2xl font-bold">Actualizar datos de un estudiante</h2>
         <p class="text-slate-500">
-          Elige el nivel de la matrícula que quieres editar. Después se elige la parte y el
-          estudiante: así solo se carga lo que se va a modificar.
+          Busca al estudiante a modificar. Al elegirlo se guarda en este equipo y se analiza su
+          grado (Primera Infancia o Educación Básica) para mostrar solo las partes que
+          corresponden.
         </p>
       </header>
       <div
@@ -536,93 +639,8 @@ function caserioEnModoSelect(): boolean {
         <span class="font-semibold">VITE_SHEET_ESTUDIANTES_URL</span> para poder buscar y leer
         matrículas.
       </div>
-      <div v-else class="grid gap-3 sm:grid-cols-2">
-        <button
-          v-for="opcion in NIVELES"
-          :key="opcion.id"
-          type="button"
-          class="rounded-xl border border-slate-300 bg-white p-4 text-left transition-colors hover:border-primario hover:bg-primario-suave/40"
-          @click="elegirNivel(opcion.id)"
-        >
-          <p class="text-sm font-bold text-slate-900">{{ opcion.nombre }}</p>
-          <p class="mt-1 text-xs text-slate-500">{{ opcion.descripcion }}</p>
-        </button>
-      </div>
-    </div>
-
-    <template v-else>
-      <!-- ══ Barra del nivel/parte elegido (fija al hacer scroll) ══ -->
-      <div class="sticky top-0 z-10 -mx-3 bg-white px-3 pt-3 pb-2 md:-mx-4 md:px-4 md:pt-4">
-        <div
-          class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-primario-suave/60 px-4 py-3"
-        >
-          <div>
-            <p class="text-sm font-bold text-slate-900">Actualizar · {{ nivelNombre }}</p>
-            <p class="text-xs text-slate-500">
-              {{
-                parte
-                  ? `${parte.etiqueta} — ${parte.titulo}${elegido ? ` · ${elegido.nombre}` : ''}`
-                  : 'Elige la parte que quieres modificar'
-              }}
-            </p>
-          </div>
-          <div class="flex shrink-0 items-center gap-2">
-            <button
-              v-if="!parte"
-              type="button"
-              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-              @click="cambiarNivel"
-            >
-              Cambiar nivel
-            </button>
-            <button
-              v-else
-              type="button"
-              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-              @click="cambiarParte"
-            >
-              Cambiar parte
-            </button>
-            <button
-              type="button"
-              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-              @click="cancelarEdicion"
-            >
-              Cancelar
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- ══ PASO 2 · Elegir la parte a modificar ══ -->
-      <div v-if="!parte" class="grid gap-3 sm:grid-cols-2">
-        <button
-          v-for="opcion in partesNivel"
-          :key="opcion.id"
-          type="button"
-          class="rounded-xl border border-slate-300 bg-white p-4 text-left transition-colors hover:border-primario hover:bg-primario-suave/40"
-          @click="elegirParte(opcion)"
-        >
-          <span
-            class="text-xs font-semibold uppercase tracking-wide text-primario"
-          >{{ opcion.etiqueta }}</span>
-          <p class="text-sm font-bold text-slate-900">{{ opcion.titulo }}</p>
-        </button>
-      </div>
-
-      <!-- ══ PASO 3 · Buscar al estudiante (tiempo real desde 3 letras) ══ -->
-      <div
-        v-else-if="!elegido"
-        class="space-y-4 rounded-xl border border-slate-200 bg-white p-4 sm:p-5"
-      >
-        <header>
-          <p class="text-xs font-semibold uppercase tracking-wide text-primario">
-            {{ parte.etiqueta }}
-          </p>
-          <h3 class="text-sm font-bold text-slate-900">{{ parte.titulo }}</h3>
-        </header>
-
-        <div>
+      <template v-else>
+        <div class="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
           <label for="a-buscar" class="text-xs font-semibold text-slate-600">
             Estudiante a modificar <span class="text-red-500">*</span>
           </label>
@@ -635,15 +653,18 @@ function caserioEnModoSelect(): boolean {
             :class="claseCampo('')"
           />
           <p class="mt-1 text-xs text-slate-400">
-            Busca SOLO entre los estudiantes del nivel elegido (hoja "{{ hojaDeNivel(nivel!) }}"
-            del libro). La búsqueda arranca a partir de {{ LETRAS_MINIMAS }} letras.
+            La búsqueda recorre LAS DOS hojas del libro (primera infancia y básica) y arranca a
+            partir de {{ LETRAS_MINIMAS }} letras.
           </p>
         </div>
 
         <div v-if="buscando" class="text-sm text-slate-500">Buscando…</div>
         <p v-else-if="errorBusqueda" class="text-sm text-amber-700">{{ errorBusqueda }}</p>
+        <p v-else-if="hojaFallada" class="text-sm text-amber-700">
+          La hoja "{{ hojaFallada }}" no respondió: los resultados pueden estar incompletos.
+        </p>
         <p
-          v-else-if="letras.trim().length > 0 && letras.trim().length < LETRAS_MINIMAS"
+          v-else-if="letras.length > 0 && letras.trim().length < LETRAS_MINIMAS"
           class="text-xs text-slate-400"
         >
           Escribe al menos {{ LETRAS_MINIMAS }} letras para que empiece la búsqueda.
@@ -652,25 +673,111 @@ function caserioEnModoSelect(): boolean {
         <div v-if="coincidencias.length > 0" class="space-y-2">
           <p class="text-xs font-semibold text-slate-500">
             {{ coincidencias.length }} coincidencia{{ coincidencias.length === 1 ? '' : 's' }} —
-            haz click para editar:
+            haz click para leer su matrícula y guardarla en este equipo:
           </p>
           <button
             v-for="coincidencia in coincidencias"
             :key="`${coincidencia.hoja}-${coincidencia.fila}`"
             type="button"
-            class="w-full rounded-lg border border-slate-300 bg-white px-4 py-3 text-left transition-colors hover:border-primario hover:bg-primario-suave/40"
+            class="flex w-full items-start justify-between gap-3 rounded-lg border border-slate-300 bg-white px-4 py-3 text-left transition-colors hover:border-primario hover:bg-primario-suave/40"
             @click="elegirEstudiante(coincidencia)"
           >
-            <p class="text-sm font-bold text-slate-900">{{ coincidencia.nombre }}</p>
-            <p class="mt-0.5 text-xs text-slate-500">
-              NIE {{ coincidencia.nie || '—' }} · Grado {{ coincidencia.grado || '—' }} · fila
-              {{ coincidencia.fila }} de "{{ coincidencia.hoja }}"
+            <span>
+              <p class="text-sm font-bold text-slate-900">{{ coincidencia.nombre }}</p>
+              <p class="mt-0.5 text-xs text-slate-500">
+                NIE {{ coincidencia.nie || '—' }} · Grado {{ coincidencia.grado || '—' }} · fila
+                {{ coincidencia.fila }} de "{{ coincidencia.hoja }}"
+              </p>
+            </span>
+            <span
+              class="shrink-0 rounded-full bg-primario-suave px-2 py-0.5 text-xs font-semibold text-primario"
+            >
+              {{ nombreNivel(nivelDeHoja(coincidencia.hoja)) }}
+            </span>
+          </button>
+        </div>
+      </template>
+    </div>
+
+    <template v-else>
+      <!-- ══ Barra del estudiante/parte (fija al hacer scroll) ══ -->
+      <div class="sticky top-0 z-10 -mx-3 bg-white px-3 pt-3 pb-2 md:-mx-4 md:px-4 md:pt-4">
+        <div
+          class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-primario-suave/60 px-4 py-3"
+        >
+          <div>
+            <p class="text-sm font-bold text-slate-900">Actualizar · {{ nivelNombre }}</p>
+            <p class="text-xs text-slate-500">{{ textoBarra }}</p>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <button
+              v-if="parte"
+              type="button"
+              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+              @click="irALasPartes"
+            >
+              Cambiar parte
+            </button>
+            <button
+              type="button"
+              class="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+              @click="cambiarEstudiante"
+            >
+              Cambiar estudiante
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ══ PASO 2 · Las partes a modificar (según el GRADO analizado) ══ -->
+      <div v-if="!parte" class="space-y-4">
+        <!-- Tarjeta del estudiante guardado en local -->
+        <div class="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-wide text-primario">
+              Estudiante guardado en este equipo
             </p>
+            <h3 class="text-sm font-bold text-slate-900">{{ elegido!.nombre }}</h3>
+            <p class="mt-1 text-xs text-slate-500">
+              NIE {{ elegido!.nie || '—' }} · Grado "{{ elegido!.grado || '—' }}"
+              <template v-if="gradoIdElegido !== null">(id {{ gradoIdElegido }})</template>
+              · fila {{ elegido!.fila }} de "{{ elegido!.hoja }}"
+            </p>
+          </div>
+          <div class="mt-3 rounded-lg bg-primario-suave/60 px-3 py-2 text-xs text-slate-600">
+            <p>
+              <span class="font-semibold">Análisis del grado:</span>
+              {{ elegido!.grado || 'sin grado' }}
+              <template v-if="gradoIdElegido !== null">(id {{ gradoIdElegido }})</template>
+              → <span class="font-semibold text-primario">{{ nivelNombre }}</span
+              >. De Primero hacia abajo es Primera Infancia; de Segundo en adelante, Educación
+              Básica.
+            </p>
+            <p v-if="nivelIncoherente" class="mt-1 font-medium text-amber-700">
+              Ojo: el grado apunta a {{ nombreNivel(nivelSegunGrado!) }}, pero la fila vive en la
+              hoja "{{ elegido!.hoja }}". Se muestran las partes de la hoja para no escribir en la
+              hoja equivocada.
+            </p>
+          </div>
+        </div>
+
+        <div class="grid gap-3 sm:grid-cols-2">
+          <button
+            v-for="opcion in partesNivel"
+            :key="opcion.id"
+            type="button"
+            class="rounded-xl border border-slate-300 bg-white p-4 text-left transition-colors hover:border-primario hover:bg-primario-suave/40"
+            @click="elegirParte(opcion)"
+          >
+            <span class="text-xs font-semibold uppercase tracking-wide text-primario">
+              {{ opcion.etiqueta }}
+            </span>
+            <p class="text-sm font-bold text-slate-900">{{ opcion.titulo }}</p>
           </button>
         </div>
       </div>
 
-      <!-- ══ PASO 4 · Formulario de la parte, TODO editable ══ -->
+      <!-- ══ PASO 3 · Formulario de la parte, TODO editable ══ -->
       <div v-else class="rounded-xl border border-slate-200 bg-white">
         <div class="border-b border-slate-100 px-4 py-3">
           <p class="text-xs font-semibold uppercase tracking-wide text-primario">
@@ -678,9 +785,9 @@ function caserioEnModoSelect(): boolean {
           </p>
           <h3 class="text-sm font-bold text-slate-900">{{ parte.titulo }}</h3>
           <p class="mt-1 text-xs text-slate-500">
-            Editando a <span class="font-semibold">{{ elegido.nombre }}</span> — NIE
-            {{ elegido.nie || '—' }} · Grado {{ elegido.grado || '—' }} · fila
-            {{ elegido.fila }} de "{{ elegido.hoja }}". Al guardar, los cambios van al Sheet y a
+            Editando a <span class="font-semibold">{{ elegido!.nombre }}</span> — NIE
+            {{ elegido!.nie || '—' }} · Grado {{ elegido!.grado || '—' }} · fila
+            {{ elegido!.fila }} de "{{ elegido!.hoja }}". Al guardar, los cambios van al Sheet y a
             Firebase.
           </p>
         </div>
@@ -1000,9 +1107,16 @@ function caserioEnModoSelect(): boolean {
             <button
               type="button"
               class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
-              @click="volverABuscar"
+              @click="irALasPartes"
             >
-              Elegir otro estudiante
+              Cambiar parte
+            </button>
+            <button
+              type="button"
+              class="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-600 transition-colors hover:bg-slate-50"
+              @click="cambiarEstudiante"
+            >
+              Cambiar estudiante
             </button>
           </div>
         </div>
